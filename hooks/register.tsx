@@ -106,6 +106,23 @@ function planAnwenden(schritte: Schritt[], ein: Record<string, unknown>): Schrit
   return neu
 }
 
+// Kürzt auf das Wesentliche: Vorspann bis zum Doppelpunkt und alles nach dem ersten Satzteil fällt weg,
+// der Rest wird an einer Wortgrenze abgeschnitten, wenn er nicht in die Zeile passt.
+function knapp(text: string, max: number) {
+  const ganz = text.trim()
+  const ohneVorspann = /^[^:]{1,25}:\s+(.+)$/.exec(ganz)?.[1] ?? ganz
+  const teil = ohneVorspann.split(/[.!;,](?:\s|$)|\s[–—-]\s/)[0].trim() || ohneVorspann
+  if (teil.length <= max) return teil
+  const schnitt = teil.slice(0, Math.max(max - 1, 1))
+  const leer = schnitt.lastIndexOf(' ')
+  return `${leer > max / 2 ? schnitt.slice(0, leer) : schnitt}…`
+}
+
+const balken = (prozent: number) => {
+  const voll = Math.round(prozent / 20)
+  return '▰'.repeat(voll) + '▱'.repeat(5 - voll)
+}
+
 function zeileAus(stand: Stand, jetzt: number): BandZeile | undefined {
   if (stand.zustand === 'beendet') return undefined
   const alter = jetzt - stand.zuletzt
@@ -113,16 +130,23 @@ function zeileAus(stand: Stand, jetzt: number): BandZeile | undefined {
 
   const aktiv = stand.schritte.find(s => s.status === 'in_progress')
   const erledigt = stand.schritte.filter(s => s.status === 'completed').length
-  const fortschritt = stand.schritte.length ? `${erledigt}/${stand.schritte.length}` : ''
+  const prozent = stand.schritte.length ? Math.round((100 * erledigt) / stand.schritte.length) : null
+  const basis = { name: stand.name, zustand: stand.zustand, prozent }
 
   if (stand.zustand === 'wartet') {
-    return { name: stand.name, zustand: 'wartet', fortschritt, text: stand.notiz || 'wartet auf Antwort' }
+    return { ...basis, zustand: 'wartet', zeichen: '❓', text: stand.notiz || 'wartet auf dich' }
   }
   if (stand.zustand === 'fertig') {
-    return { name: stand.name, zustand: 'fertig', fortschritt, text: stand.notiz || 'fertig' }
+    // Runde zu Ende, Liste aber nicht: das ist kein Fertig, sondern eine Pause.
+    if (prozent !== null && prozent < 100) {
+      return { ...basis, zustand: 'fertig', zeichen: '⏸️', text: stand.notiz || aktiv?.text || 'pausiert' }
+    }
+    return { ...basis, zustand: 'fertig', zeichen: '✅', text: stand.notiz || 'fertig' }
   }
-  const still = alter > STILL_AB ? ` (seit ${Math.round(alter / MINUTE)} Min. keine Meldung)` : ''
-  return { name: stand.name, zustand: 'arbeitet', fortschritt, text: `${aktiv?.text ?? 'arbeitet'}${still}` }
+  if (alter > STILL_AB) {
+    return { ...basis, zustand: 'arbeitet', zeichen: '⚠️', vorsatz: `${Math.round(alter / MINUTE)} Min. still`, text: aktiv?.text ?? 'keine Meldung' }
+  }
+  return { ...basis, zustand: 'arbeitet', zeichen: '🔄', text: aktiv?.text ?? 'arbeitet' }
 }
 
 const RANG: Record<BandZeile['zustand'], number> = { wartet: 0, arbeitet: 1, fertig: 2 }
@@ -399,21 +423,36 @@ export const register: Register = on => {
     if (stand === null || e.props.hasSurvey) return next(e)
 
     const { Box, Text } = $.ui.resolve(e)
+    const breite = e.props.bodyColumns
+    const mitBalken = breite >= 56
+    const anzeige = (prozent: number | null | undefined) =>
+      typeof prozent === 'number' ? `${mitBalken ? `${balken(prozent)} ` : ''}${prozent} %` : ''
+
     const eigen = e.props.isWorking ? stand.eigenerSchritt || 'arbeitet' : 'bereit'
-    const zeichen = { arbeitet: '●', wartet: '?', fertig: '✓' } as const
+    const zahl = (z: BandZeile['zeichen']) => stand.zeilen.filter(s => s.zeichen === z).length
+    const zaehler = ['❓', '⚠️', '🔄', '⏸️', '✅'].filter(z => zahl(z) > 0).map(z => `${z}${zahl(z)}`).join(' ')
+    const mitListe = stand.zeilen.filter(z => typeof z.prozent === 'number')
+    const gesamt = mitListe.length
+      ? Math.round(mitListe.reduce((summe, z) => summe + (z.prozent ?? 0), 0) / mitListe.length)
+      : null
+    const kopfRechts = [zaehler, anzeige(gesamt)].filter(Boolean).join('  ')
 
     return (
       <Box flexDirection="column">
         <Text wrap="truncate-end">
-          <Text bold>🎼 Dirigent</Text> · {eigen}
+          <Text bold>🎼 Dirigent</Text> {knapp(eigen, Math.max(breite - kopfRechts.length - 18, 8))}
+          {kopfRechts ? `  ${kopfRechts}` : ''}
         </Text>
         {stand.zeilen.length === 0 ? <Text dimColor>Keine Arbeits-Session aktiv</Text> : null}
-        {stand.zeilen.map(z => (
-          <Text wrap="truncate-end" dimColor={z.zustand === 'fertig'} bold={z.zustand === 'wartet'}>
-            {zeichen[z.zustand]} {z.name}
-            {z.fortschritt ? ` ${z.fortschritt}` : ''} · {z.text}
-          </Text>
-        ))}
+        {stand.zeilen.map(z => {
+          const vorn = [`${z.zeichen} ${z.name}${anzeige(z.prozent) ? ` ${anzeige(z.prozent)}` : ''}`, z.vorsatz].filter(Boolean).join(' · ')
+
+          return (
+            <Text wrap="truncate-end" dimColor={z.zeichen === '✅'} bold={z.zeichen === '❓' || z.zeichen === '⚠️'}>
+              {vorn} · {knapp(z.text, Math.max(breite - vorn.length - 5, 10))}
+            </Text>
+          )
+        })}
       </Box>
     )
   })

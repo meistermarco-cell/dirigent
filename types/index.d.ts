@@ -1,7 +1,11 @@
 export type BandZeile = {
   name: string
   zustand: 'arbeitet' | 'wartet' | 'fertig'
-  fortschritt: string
+  zeichen: string
+  /** Erledigte Schritte in Prozent; null, solange die Session keine Liste hat. */
+  prozent: number | null
+  /** Steht ungekürzt vor dem Text, zum Beispiel wie lange eine Session schon still ist. */
+  vorsatz?: string
   text: string
 }
 

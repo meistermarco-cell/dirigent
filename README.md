@@ -5,13 +5,22 @@ A conductor for Claude Code in the Claude desktop app: one master session hands 
 Dirigent ist ein Mod mit Skill für den Code-Tab der Claude-Desktop-App. Eine Master-Session nimmt deine Aufträge an und verteilt sie an Arbeits-Sessions mit passendem Modell. Sie überwacht Fortschritt, Limits und Kontext und archiviert fertige Sessions.
 
 ```
-🎼 Dirigent · Lage prüfen
-? farb-wahl · Welche Farbe?
-● layout-bau 2/4 · Band bauen
-✓ wissen-einbau 3/3 · Bestand ist eingearbeitet.
+🎼 Dirigent bereit  ❓1 🔄2 ✅1  ▰▰▰▱▱ 58 %
+❓ farb-wahl ▰▰▱▱▱ 40 % · Welche Farbe?
+🔄 layout-bau ▰▰▰▱▱ 50 % · Band bauen
+🔄 mix ▱▱▱▱▱ 0 % · Spuren einlesen
+✅ wissen ▰▰▰▰▰ 100 % · Bestand eingearbeitet
 ```
 
-Das Band steht immer zwischen Chatverlauf und Texteingabe: `?` wartet auf dich, `●` arbeitet, `✓` ist fertig und verschwindet nach 30 Minuten.
+Das Band steht immer zwischen Chatverlauf und Texteingabe und zeigt das Wichtigste auf kleinem Raum:
+
+| Zeichen | Bedeutung |
+|---|---|
+| ❓ | wartet auf dich |
+| ⚠️ | seit über 20 Minuten keine Meldung |
+| 🔄 | arbeitet |
+| ⏸️ | Runde zu Ende, Aufgabenliste aber nicht |
+| ✅ | fertig, verschwindet nach 30 Minuten |
 
 ## Installieren
 
@@ -52,9 +61,9 @@ Alles bleibt auf deinem Rechner, der Mod sendet nichts ins Netz.
 ## Grenzen
 
 - Das Band ist nur so aktuell wie die Aufgabenlisten der Sessions; jeder Auftrag verlangt deshalb, die Liste zu führen.
-- Eine Session, die auf eine Freigabe-Karte wartet, erscheint als `●`, nicht als `?`.
+- Eine Session, die auf eine Freigabe-Karte wartet, erscheint als 🔄, nicht als ❓.
 - Stand-Dateien bleiben liegen, werden nach 24 Stunden aber nicht mehr gelesen.
-- Abgestürzte Sessions zeigen ab 20 Minuten `keine Meldung` und verschwinden nach 24 Stunden.
+- Abgestürzte Sessions zeigen ab 20 Minuten ⚠️ und verschwinden nach 24 Stunden.
 - Getestet ist der Mod bisher nur auf einem Mac mit Claude Code 2.1.317.
 
 ## Entwickeln

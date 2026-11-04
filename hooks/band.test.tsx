@@ -31,6 +31,7 @@ function welt(on: any, dateien: Record<string, object>, geschrieben: Record<stri
     return { value: undefined }
   })
   on('ui.status', () => ({ value: undefined }))
+  on('clock.every', () => ({ value: { cancel: () => {} } }))
 }
 
 const stand = (name: string, zustand: string, schritte: object[] = [], notiz = '', zuletzt = JETZT, istMaster = false) => ({
@@ -50,8 +51,10 @@ test('das Band zeigt Dirigent und Arbeits-Sessions, Wartende zuerst', async ($, 
   const ui = await $.ui.mount(BAND)
   const text = (await ui.findAll({ type: 'Text' })).map((t: any) => t.text).join('\n')
   expect(text).toContain('Lage prüfen')
-  expect(text).toContain('? frage · Welche Farbe?')
-  expect(text).toContain('● bau 1/2 · Band bauen')
+  expect(text).toContain('❓ frage · Welche Farbe?')
+  expect(text).toContain('🔄 bau ▰▰▰▱▱ 50 % · Band bauen')
+  expect(text).toContain('🔄1')
+  expect(text).toContain('❓1')
   expect(text.indexOf('frage')).toBeLessThan(text.indexOf('bau'))
   expect(text).not.toContain('weg')
   expect(text).not.toContain('längst fertig')
@@ -112,4 +115,39 @@ test('eine Arbeits-Session meldet ihre Liste und ihren Abschluss', async ($, on)
   datei = JSON.parse(geschrieben[pfad])
   expect(datei.notiz).toBe('Alles fertig gebaut.')
   expect(datei.schritte.every((s: any) => s.status === 'completed')).toBe(true)
+})
+
+const zeilenVon = async ($: any, on: any, dateien: Record<string, object>, breite: number) => {
+  welt(on, dateien)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: breite } })
+  const text = (await ui.findAll({ type: 'Text' })).map((t: any) => t.text).join('\n')
+  await ui.unmount()
+  return text
+}
+
+test('ein langer Bericht wird knapp, aber bleibt lesbar', async ($, on) => {
+  const text = await zeilenVon($, on, {
+    'aaaaaaaa-1.json': stand('gitarre', 'fertig', [{ text: 'A', status: 'completed' }], 'Gitarre fertig: 13 Stellen in der DI repariert, gemessen 0 abweichende Samples.'),
+  }, 80)
+  expect(text).toContain('✅ gitarre ▰▰▰▰▰ 100 % · 13 Stellen in der DI repariert')
+  expect(text).not.toContain('gemessen')
+})
+
+test('im schmalen Fenster fällt der Balken weg, die Prozentzahl bleibt', async ($, on) => {
+  const text = await zeilenVon($, on, {
+    'aaaaaaaa-1.json': stand('mix', 'arbeitet', [{ text: 'Eins', status: 'completed' }, { text: 'Ketten je Spur in mix.py bauen und fitten', status: 'in_progress' }]),
+  }, 40)
+  expect(text).toContain('🔄 mix 50 % · ')
+  expect(text).not.toContain('▰')
+  expect(text).toContain('…')
+})
+
+test('Pause und Stille sind von Fertig und Arbeiten zu unterscheiden', async ($, on) => {
+  const text = await zeilenVon($, on, {
+    'aaaaaaaa-1.json': stand('halb', 'fertig', [{ text: 'A', status: 'completed' }, { text: 'B', status: 'pending' }]),
+    'aaaaaaaa-2.json': stand('still', 'arbeitet', [{ text: 'Messen', status: 'in_progress' }], '', JETZT - 25 * 60_000),
+  }, 80)
+  expect(text).toContain('⏸️ halb')
+  expect(text).toContain('⚠️ still ▱▱▱▱▱ 0 % · 25 Min. still · Messen')
 })

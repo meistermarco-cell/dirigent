@@ -24,7 +24,7 @@ Der Skill funktioniert in jedem neuen Chat, ohne Vorwissen, in jedem Arbeitsordn
 
 ## Band über der Texteingabe
 
-Die Mod zeigt im Master immer ein Band zwischen Chatverlauf und Texteingabe: in der ersten Zeile, was der Dirigent gerade tut, darunter je Arbeits-Session Name, Fortschritt und aktueller Schritt (`?` wartet auf Antwort, `●` arbeitet, `✓` fertig, nach 30 Minuten ausgeblendet). Es speist sich aus den Aufgabenlisten (`update_plan`) und dem Abschlussbericht (`wrap_up`) jeder Session; die Mod meldet sie nach `~/.claude/dirigent/stand/`. Der Master und jede Arbeits-Session führen deshalb ihre Aufgabenliste gewissenhaft; das steht auch in jedem Auftrag. Im Notbetrieb ohne Mod gibt es kein Band.
+Die Mod zeigt im Master immer ein Band zwischen Chatverlauf und Texteingabe. Kopfzeile: was der Dirigent gerade tut, wie viele Sessions in welchem Zustand sind und der Gesamtfortschritt. Darunter je Arbeits-Session Zeichen, Name, Fortschritt in Prozent und in Stichworten der aktuelle Schritt: `❓` wartet auf den Nutzer, `⚠️` seit über 20 Minuten still, `🔄` arbeitet, `⏸️` Runde zu Ende, Liste aber nicht, `✅` fertig (nach 30 Minuten ausgeblendet). Es speist sich aus den Aufgabenlisten (`update_plan`) und dem Abschlussbericht (`wrap_up`) jeder Session; die Mod meldet sie nach `~/.claude/dirigent/stand/`. Der Master und jede Arbeits-Session führen deshalb ihre Aufgabenliste gewissenhaft; das steht auch in jedem Auftrag. Im Notbetrieb ohne Mod gibt es kein Band.
 
 ## Freigaben
 
@@ -78,7 +78,8 @@ was dieser Auftrag verlangt: arbeite ihn selbständig durch, ohne um Bestätigun
 den Nutzer nicht in Prosa; schreib offene Fragen in deine Schlussmeldung, der Dirigent klärt sie.
 Schreibt der Nutzer dir direkt in diesem Fenster, gilt das wie ein Auftrag; nenn es in der Schlussmeldung.
 Führe von Anfang an deine Aufgabenliste (update_plan) und rücke sie bei jedem Schritt weiter: der Nutzer
-sieht deinen Stand nur dort.
+sieht deinen Stand nur dort, im Dirigenten-Band nur eine Zeile. Schritte daher in höchstens 5 Wörtern, das
+Wichtigste zuerst; beginne den wrap_up-Bericht mit dem Ergebnis in einem kurzen Satz.
 Committe nur, wenn der Auftrag es sagt. Schluss: 3–6 Zeilen mit Ergebnis, geänderten Dateien,
 offenen Fragen, Kontext-%. Startest du selbst Sessions, gib ihnen nie eine ⟦dirigent…⟧-Marke.
 ```
