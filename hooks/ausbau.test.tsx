@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-// Tests für offene Punkte, Stand nach Neustart, Gemeldet/Geprüft, Knöpfe, Dateikonflikte, Limit, Wirkung
+// Tests für offene Punkte, Stand nach Neustart, Gemeldet/Geprüft, Band als Anzeige, Dateikonflikte, Limit, Wirkung
 // von Skill-Änderungen und Freigabe-Karten. Die Welt hat ein Dateisystem im Speicher: was die Mod schreibt,
 // liest sie auch wieder, so wie nach einem Neustart.
 const ID = 'aaaaaaaa-0000-4000-8000-000000000000'
@@ -26,7 +26,6 @@ type Welt = {
   store: Record<string, unknown>
   /** Was das Modell neben jeder Nachricht liest. */
   kontexte: (readonly string[] | undefined)[]
-  toasts: string[]
   sessionId: string
   /** Steht unter jedem Werkzeug-Aufruf, wie die Engine. */
   werkzeugAntwort: () => unknown
@@ -42,7 +41,6 @@ function welt(
     aufrufe: [],
     uhr: mock.clock(on, { now: JETZT }),
     kontexte: [],
-    toasts: [],
     sessionId: ID,
     werkzeugAntwort: () => ({ result: {} }),
     freigabeAntwort: {},
@@ -85,10 +83,6 @@ function welt(
     return { value: undefined }
   })
   on('ui.status', () => ({ value: undefined }))
-  on('ui.toast', (_: any, e: any) => {
-    w.toasts.push(e.text)
-    return { value: undefined }
-  })
   on('mcp.call', (_: any, e: any) => {
     w.aufrufe.push({ server: e.server, tool: e.tool, args: e.args })
     const antwort = mcp?.(e.tool, e.args)
@@ -426,13 +420,14 @@ test('Stand-Dateien älterer Fassungen ohne Prüfung zeigen ☑️, ein abgestü
   expect(text).not.toContain('tot')
 })
 
-// --- 3. Knöpfe ---
+// --- 3. Band als reine Anzeige ---
 
-const ZIEL = 'local_0000'
-const mitZiel = (name: string, zustand: string, extra: object = {}, id = name) => ({
+const mitHostId = (name: string, zustand: string, extra: object = {}, id = name) => ({
   [STAND(KENNUNG, id)]: standDatei(name, zustand, FERTIG, 'Text', JETZT, extra),
-  [ZUSATZ(id)]: { hostId: `${ZIEL}-${name}`, pfade: [] },
+  [ZUSATZ(id)]: { hostId: `local_0000-${name}`, pfade: [] },
 })
+const standZeilen = async (ui: any) =>
+  (await ui.findAll({ type: 'Text' })).map((t: any) => t.text as string).filter((t: string) => /^(❓|⚠️|🔄|⏸️|☑️|✅|…)/u.test(t))
 
 test('eine Arbeits-Session schreibt ihre local-Id, außerhalb der App keine', async ($, on) => {
   const w = welt(on, { rolle: 'arbeit', env: { CLAUDE_CODE_HOST_SESSION_ID: 'local_abc' } })
@@ -441,96 +436,60 @@ test('eine Arbeits-Session schreibt ihre local-Id, außerhalb der App keine', as
   expect(JSON.parse(w.dateien[ZUSATZ(ID)]).hostId).toBe('local_abc')
 })
 
-test('ohne host-Id gibt es keine Knöpfe', async ($, on) => {
+test('ohne Host-Id steht auch keine in der Zusatz-Datei', async ($, on) => {
   const w = welt(on, { rolle: 'arbeit' })
   await $.session.start(START)
   await nachricht($, 'los')
   expect(JSON.parse(w.dateien[ZUSATZ(ID)]).hostId).toBeUndefined()
 })
 
-test('bei einer wartenden Session stehen Öffnen und Stoppen im Band und rufen die App auf', async ($, on) => {
-  const w = welt(on, { dateien: { ...mitZiel('frage', 'wartet'), ...mitZiel('andere', 'arbeitet') } })
+for (const surface of ['desktop', 'terminal'] as const) {
+  test(`das Band hat im Fenster ${surface} keine Bedienelemente und ruft nichts auf`, async ($, on) => {
+    const w = welt(on, { dateien: { ...mitHostId('frage', 'wartet', { blockiert: true }), ...mitHostId('bau', 'arbeitet') } })
+    await $.session.start(START)
+    const ui = await $.ui.mount({ ...BAND, surface })
+    expect(await ui.findAll({ type: 'Button' })).toHaveLength(0)
+    expect(await ui.findAll({ type: 'Input' })).toHaveLength(0)
+    expect(await ui.findAll({ type: 'Select' })).toHaveLength(0)
+    expect((await standZeilen(ui)).length).toBe(2)
+    expect(w.aufrufe.filter(a => ['open_session_in', 'stop_session', 'send_message'].includes(a.tool))).toHaveLength(0)
+    await ui.unmount()
+  })
+}
+
+test('das Band bleibt bei vielen Sessions kompakt, das Dringendste steht oben, der Rest ist gezählt', async ($, on) => {
+  const dateien = Object.assign(
+    {},
+    mitHostId('s-frage', 'wartet'),
+    ...['a', 'b', 'c'].map(n => mitHostId(`s-${n}`, 'arbeitet')),
+    ...['d', 'e'].map(n => mitHostId(`s-${n}`, 'fertig')),
+  )
+  welt(on, { dateien })
   await $.session.start(START)
+  // Auf dem Desktop ist `maxRows` immer 12: Es darf das Band nicht größer machen.
   const ui = await $.ui.mount(BAND)
-  await ui.press({ key: 'oeffnen' })
-  expect(w.aufrufe.find(a => a.tool === 'open_session_in')).toMatchObject({ server: 'ccd_window', args: { session_id: `${ZIEL}-frage`, target: 'split' } })
-  await ui.press({ key: 'stoppen' })
-  expect(w.aufrufe.find(a => a.tool === 'stop_session')).toMatchObject({ server: 'ccd_session_mgmt', args: { session_id: `${ZIEL}-frage` } })
+  const zeilen = await standZeilen(ui)
+  expect(zeilen).toHaveLength(4)
+  expect(zeilen[0]).toContain('❓ s-frage')
+  expect(zeilen[3]).toBe('… und 3 weitere: 🔄1 ☑️2')
   await ui.unmount()
 })
 
-test('eine ausgewählte Session bekommt die Knöpfe, ohne Auswahl und ohne Wartende gibt es nur die Auswahl', async ($, on) => {
-  const w = welt(on, { dateien: { ...mitZiel('bau', 'arbeitet'), ...mitZiel('fertig', 'fertig') } })
+test('genau so viele Sessions wie Platz brauchen keine Sammelzeile', async ($, on) => {
+  welt(on, { dateien: Object.assign({}, ...['a', 'b', 'c', 'd'].map(n => mitHostId(`s-${n}`, 'arbeitet'))) })
   await $.session.start(START)
   const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ key: 'oeffnen' })).toBeUndefined()
-  await ui.select({ key: 'auswahl', value: `${ZIEL}-fertig` })
-  expect(await ui.find({ key: 'oeffnen' })).toBeDefined()
-  // Eine fertige Session lässt sich nicht stoppen.
-  expect(await ui.find({ key: 'stoppen' })).toBeUndefined()
-  await ui.select({ key: 'auswahl', value: `${ZIEL}-bau` })
-  await ui.press({ key: 'stoppen' })
-  expect(w.aufrufe.find(a => a.tool === 'stop_session')?.args.session_id).toBe(`${ZIEL}-bau`)
+  const zeilen = await standZeilen(ui)
+  expect(zeilen).toHaveLength(4)
+  expect(zeilen.join('\n')).not.toContain('weitere')
   await ui.unmount()
 })
 
-test('schlägt ein Knopf fehl, gibt es einen Toast und keinen Fehler', async ($, on) => {
-  const w = welt(on, { dateien: mitZiel('frage', 'wartet'), mcp: tool => {
-    if (tool === 'open_session_in') return { content: [{ type: 'text', text: 'nicht erlaubt' }], isError: true }
-    if (tool === 'stop_session') throw new Error('weg')
-    return undefined
-  } })
+test('ein kleines maxRows verkleinert das Band weiter', async ($, on) => {
+  welt(on, { dateien: Object.assign({}, ...['a', 'b', 'c'].map(n => mitHostId(`s-${n}`, 'arbeitet'))) })
   await $.session.start(START)
-  const ui = await $.ui.mount(BAND)
-  await ui.press({ key: 'oeffnen' })
-  await ui.press({ key: 'stoppen' })
-  expect(w.toasts[0]).toContain('nicht erlaubt')
-  expect(w.toasts[1]).toContain('stop_session')
-  await ui.unmount()
-})
-
-test('Knöpfe verdrängen auf kleinem Band keine Stand-Zeile', async ($, on) => {
-  welt(on, { dateien: { ...mitZiel('a', 'wartet'), ...mitZiel('b', 'arbeitet'), ...mitZiel('c', 'arbeitet') } })
-  await $.session.start(START)
-  // Kopf + 3 Sessions = 4 Zeilen: mit 4 erlaubten Zeilen ist kein Platz für Knöpfe.
-  const klein = await $.ui.mount({ ...BAND, props: { ...BAND.props, maxRows: 4 } })
-  expect(await klein.find({ key: 'oeffnen' })).toBeUndefined()
-  expect((await klein.findAll({ type: 'Text' })).map((t: any) => t.text).join('\n')).toContain('❓ a')
-  await klein.unmount()
-  const schmal = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 30 } })
-  expect(await schmal.find({ key: 'oeffnen' })).toBeUndefined()
-  await schmal.unmount()
-  const genug = await $.ui.mount({ ...BAND, props: { ...BAND.props, maxRows: 5 } })
-  expect(await genug.find({ key: 'oeffnen' })).toBeDefined()
-  await genug.unmount()
-})
-
-test('im Terminal gibt es keine Knöpfe, auch wenn eine Id bekannt ist', async ($, on) => {
-  welt(on, { dateien: mitZiel('frage', 'wartet') })
-  await $.session.start(START)
-  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await ui.find({ key: 'oeffnen' })).toBeUndefined()
-  await ui.unmount()
-})
-
-test('eine Frage am Rundenende lässt sich aus dem Band beantworten, die Marke geht mit', async ($, on) => {
-  const w = welt(on, { dateien: mitZiel('frage', 'wartet', { blockiert: true }) })
-  await $.session.start(START)
-  const ui = await $.ui.mount(BAND)
-  await ui.input({ key: `antwort-${ZIEL}-frage`, text: 'Blau', submit: true })
-  const gesendet = w.aufrufe.find(a => a.tool === 'send_message')
-  expect(gesendet?.args.session_id).toBe(`${ZIEL}-frage`)
-  expect(gesendet?.args.message).toContain(`⟦dirigent:frage@${KENNUNG}⟧`)
-  expect(gesendet?.args.message).toContain('"Blau"')
-  await ui.unmount()
-})
-
-test('auf eine Karte passt keine Nachricht: kein Eingabefeld, solange die Session mitten in der Runde wartet', async ($, on) => {
-  welt(on, { dateien: mitZiel('karte', 'wartet') })
-  await $.session.start(START)
-  const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ key: `antwort-${ZIEL}-karte` })).toBeUndefined()
-  expect(await ui.find({ key: 'oeffnen' })).toBeDefined()
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, maxRows: 2 } })
+  expect(await standZeilen(ui)).toEqual(['… 3 weitere: 🔄3'])
   await ui.unmount()
 })
 

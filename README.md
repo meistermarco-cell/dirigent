@@ -25,7 +25,9 @@ Das Band steht immer zwischen Chatverlauf und Texteingabe und zeigt das Wichtigs
 | ☑️ | die Session hat sich fertig gemeldet, der Dirigent hat es noch nicht geprüft |
 | ✅ | vom Dirigenten geprüft, verschwindet nach 30 Minuten |
 
-Auf dem Desktop stehen unter den Stand-Zeilen Knöpfe: eine Session wählen, öffnen und stoppen. Wartet eine Session, ist sie schon ausgewählt. Hat sie ihre Runde mit einer Frage beendet, kannst du direkt im Band antworten.
+Das Band ist eine reine Anzeige mit höchstens 5 Zeilen. Passen nicht alle Sessions hinein, stehen die dringendsten oben und der Rest gezählt in einer Sammelzeile (`… und 3 weitere: 🔄1 ☑️2`).
+
+Alle Eingaben machst du beim Dirigenten: Er leitet deine Antworten an Sessions weiter und stoppt sie, wenn du es sagst. Nur Freigabe-Karten, Auswahl-Fragen und Anhänge bleiben technisch im Fenster der jeweiligen Session.
 
 ## Offene Punkte
 
@@ -71,7 +73,7 @@ Der Dirigent **schlägt nur vor**. Er ändert keinen Skill ohne dein Wort, insta
 
 ## Was wo liegt
 
-Alles bleibt auf deinem Rechner, der Mod sendet nichts ins Netz. Er ruft nur lokale Dienste der App auf (Titel, Limit, Öffnen, Stoppen, Antworten). Nur eine Recherche-Session für Skill-Vorschläge sucht im Netz, wie jede Session, die das darf; sie schickt dabei Suchanfragen zum Projekt hinaus.
+Alles bleibt auf deinem Rechner, der Mod sendet nichts ins Netz. Er ruft nur lokale Dienste der App auf (Titel, Limit). Nur eine Recherche-Session für Skill-Vorschläge sucht im Netz, wie jede Session, die das darf; sie schickt dabei Suchanfragen zum Projekt hinaus.
 
 | Was | Wo |
 |---|---|
@@ -91,7 +93,8 @@ Alles bleibt auf deinem Rechner, der Mod sendet nichts ins Netz. Er ruft nur lok
 - Stand-Dateien bleiben liegen, werden nach 7 Tagen aber nicht mehr gelesen. Auch ein nie geprüftes ☑️ verschwindet dann.
 - Abgestürzte Sessions zeigen ab 20 Minuten ⚠️ und verschwinden nach 24 Stunden.
 - Dateikonflikte: Das Band warnt, wenn zwei noch nicht geprüfte Sessions dieselbe Datei geändert haben, auch wenn eine schon fertig gemeldet ist. Erst die Prüfung (✅) oder das Ende einer Session nimmt sie aus dem Vergleich. Erkannt wird das nur bei `Write`, `Edit` und `NotebookEdit`, auch aus Unteragenten. Was eine Session über Bash ändert (`sed`, `git`, Skripte), ist nicht erfassbar. Sessions in eigenen Worktrees haben andere Pfade und gelten nicht als Konflikt.
-- Im Band-Feld lässt sich nur eine Frage am Ende einer Runde beantworten. Eine Freigabe-Karte oder Auswahl-Frage beantwortet keine Nachricht; dafür gibt es `Öffnen`.
+- Das Band kann das Chatende verdecken. Die App legt die Eingabespalte samt Band über das Ende des Chats und hält es nur frei, solange der Chat mitläuft. Hast du hochgescrollt oder in den Chat geklickt, laufen neue Antworten dahinter weiter; einmal ganz nach unten scrollen schaltet das Mitlaufen wieder ein. Der Mod kann weder das Band anders platzieren noch den Chat selbst bewegen; er hält das Band nur klein.
+- Nach `/reload-plugins` verschwindet das Band kurz, bis der neu geladene Mod wieder zeichnet.
 - Die Stichwortprüfung für offene Punkte erinnert auch mal grundlos und übersieht anders Formuliertes. Verlässlich wird die Liste durch den Dirigenten, nicht durch die Prüfung.
 - Das Limit im Band stammt aus `get_usage` und wird höchstens einmal pro Minute gelesen. Geht das nicht, zeigt das Band nichts dazu.
 - Getestet ist der Mod bisher nur auf einem Mac mit Claude Code 2.1.317.

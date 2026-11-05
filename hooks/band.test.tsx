@@ -74,7 +74,7 @@ test('ohne Arbeits-Sessions steht das Band trotzdem da', async ($, on) => {
   const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, isWorking: false } })
   const text = (await ui.findAll({ type: 'Text' })).map((t: any) => t.text).join('\n')
   expect(text).toContain('bereit')
-  expect(text).toContain('Keine Arbeits-Session aktiv')
+  expect(text).toContain('keine Arbeits-Session')
   await ui.unmount()
 })
 

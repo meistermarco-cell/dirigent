@@ -5,7 +5,9 @@ description: Macht die aktuelle (neue) Session zur Master-Session „Dirigent“
 
 # Dirigent
 
-Diese Session ist **ein** Master. Der Nutzer gibt hier seine Aufträge; er kann aber jederzeit auch direkt im Fenster einer Arbeits-Session schreiben, das bleibt dort. Jede Session kann ihren eigenen Dirigenten haben: jeder Master hat eine eigene **Kennung** (8 Zeichen) und nur eigene Arbeits-Sessions; andere Dirigenten bleiben unberührt. Der Master verteilt, überwacht und räumt auf. Die eigentliche Arbeit machen **Arbeits-Sessions**, die der Master startet. Der Master liest, prüft und meldet, aber er ändert keine Projektdateien selbst.
+Diese Session ist **ein** Master. Der Nutzer gibt hier alles ein: Aufträge, Antworten und Steuerung. Jede Session kann ihren eigenen Dirigenten haben: jeder Master hat eine eigene **Kennung** (8 Zeichen) und nur eigene Arbeits-Sessions; andere Dirigenten bleiben unberührt. Der Master verteilt, überwacht und räumt auf. Die eigentliche Arbeit machen **Arbeits-Sessions**, die der Master startet. Der Master liest, prüft und meldet, aber er ändert keine Projektdateien selbst.
+
+**Grundsatz: Alle Eingaben des Nutzers finden beim Dirigenten statt.** Der Master leitet Antworten an Sessions weiter (`SendMessage`) und stoppt sie auf Zuruf (`stop_session`). Nur Freigabe-Karten, Auswahl-Fragen und Anhänge bleiben technisch im Fenster der Session; dorthin schickt er den Nutzer nur dafür.
 
 Die Mod `dirigent` (Hooks in diesem Ordner) vergibt die Kennung, merkt sich die Arbeits-Sessions dieses Masters und erinnert nach dem Bereinigen an die Übergabe. Eingaben leitet sie nicht um: das Textfeld gehört immer dem gerade geöffneten Chat.
 
@@ -27,7 +29,8 @@ Der Skill funktioniert in jedem neuen Chat, ohne Vorwissen, in jedem Arbeitsordn
 Die Mod zeigt im Master immer ein Band zwischen Chatverlauf und Texteingabe. Kopfzeile, Wichtiges zuerst: Projekt, `📌 <Anzahl>` offene Punkte, das 5-Stunden-Limit (`5h 25 %`, ab 80 % hervorgehoben als `⚠️ 5h 82 %`), Sessions je Zustand, Gesamtfortschritt, zuletzt was der Dirigent gerade tut. Darunter je Arbeits-Session Zeichen, Name, Fortschritt in Prozent und in Stichworten der aktuelle Schritt: `❓` wartet auf den Nutzer (Frage oder Freigabe-Karte), `⚠️` seit über 20 Minuten still, `🔄` arbeitet, `⏸️` Runde zu Ende, Liste aber nicht, `☑️` von der Session fertig gemeldet, `✅` vom Master geprüft (nach 30 Minuten ausgeblendet). Es speist sich aus den Aufgabenlisten (`update_plan`) und dem Abschlussbericht (`wrap_up`) jeder Session; die Mod meldet sie nach `~/.claude/dirigent/stand/`. Der Master und jede Arbeits-Session führen deshalb ihre Aufgabenliste gewissenhaft; das steht auch in jedem Auftrag. Im Notbetrieb ohne Mod gibt es kein Band.
 
 - **`⚠️ Dateikonflikt <a> + <b>: <Datei>`:** Zwei noch nicht geprüfte Sessions haben dieselbe Datei geändert, auch wenn eine schon `☑️` zeigt: Sie kann die Arbeit der anderen still überschrieben haben. Sofort ansehen; danach eine Session anhalten oder die Arbeit nacheinander legen. Die Warnung bleibt, bis `session_geprueft` höchstens eine ungeprüfte Session übrig lässt. Über Bash geänderte Dateien erfasst die Mod nicht.
-- **Knöpfe:** Auf dem Desktop kann der Nutzer im Band eine Session wählen, sie öffnen (`Öffnen`, Split-Ansicht), stoppen (`Stoppen`) und, wenn sie ihre Runde mit einer Frage beendet hat, direkt antworten. Bei einer Freigabe-Karte oder Auswahl-Frage hilft nur `Öffnen`. Solche Antworten sieht der Master nicht; er erfährt sie über die Meldung der Session.
+- **Reine Anzeige, höchstens 5 Zeilen:** Das Band hat keine Bedienelemente. Passen nicht alle Sessions hinein, stehen die dringendsten oben, der Rest gezählt in einer Sammelzeile (`… und 3 weitere: 🔄1 ☑️2`). Die Namen aller Arbeits-Sessions liefert `lage`.
+- **Verdecktes Chatende:** Die App legt Eingabe und Band über das Ende des Chats und hält es nur frei, solange der Chat mitläuft. Hat der Nutzer hochgescrollt oder in den Chat geklickt, laufen neue Antworten dahinter weiter; einmal ganz nach unten scrollen schaltet das Mitlaufen wieder ein. Die Mod kann den Chat nicht selbst bewegen.
 
 ## Freigaben
 
@@ -56,7 +59,7 @@ Arbeits-Sessions haben die Freigabe des Nutzers für alles, was ihr Auftrag verl
 
 Mehrere unabhängige Aufgaben in einer Nachricht ergeben mehrere Sessions, je eine pro Aufgabe. Was dieselben Dateien ändert, läuft nacheinander in einer Session.
 
-**Direkt in einer Arbeits-Session** geschriebene Nachrichten sieht der Master nicht; sie gelten dort wie ein Auftrag. Der Master erfährt davon über die Rückmeldung der Session. Deckt sie sich nicht mehr mit seinem Auftrag, nicht dagegen ansteuern: die neueren Worte des Nutzers gelten dort, wo sie dem Auftrag wirklich widersprechen (siehe „Arbeitsplan“).
+**Schreibt der Nutzer doch direkt in einer Arbeits-Session**, sieht der Master das nicht; es gilt dort wie ein Auftrag. Der Master erfährt davon über die Rückmeldung der Session. Deckt sie sich nicht mehr mit seinem Auftrag, nicht dagegen ansteuern: die neueren Worte des Nutzers gelten dort, wo sie dem Auftrag wirklich widersprechen (siehe „Arbeitsplan“).
 
 ### Arbeitsplan
 

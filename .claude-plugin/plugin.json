@@ -1,6 +1,6 @@
 {
   "name": "dirigent",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Conductor for Claude Code in the desktop app: one master session hands work to worker sessions, and a live band above the prompt shows what each one is doing.",
   "license": "MIT",
   "types": "./types/index.d.ts"

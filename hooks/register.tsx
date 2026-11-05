@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { ElementTable, EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
 
 import type { BandKonflikt, BandStand, BandZeile } from '../types'
 import {
@@ -135,7 +135,6 @@ const neuesEigenes = (): Eigenes => ({
 })
 
 const band = atom({ plugin: 'dirigent', key: 'band' } as const, null)
-const auswahl = atom({ plugin: 'dirigent', key: 'auswahl' } as const, null)
 
 const MINUTE = 60_000
 const GEPRUEFT_SICHTBAR = 30 * MINUTE
@@ -148,6 +147,10 @@ const ZUSATZ = '/.claude/dirigent/zusatz'
 const GEPRUEFT = '/.claude/dirigent/geprueft'
 const PFADE_MAX = 200
 const LIMIT_WARNUNG = 80
+// Höchstens so viele Zeilen hat das Band, Kopfzeile mitgezählt. Die App legt die Eingabespalte samt Band über das Ende
+// des Chats und hält nur das Ende frei, solange der Chat mitläuft (siehe README, „Grenzen“). `maxRows` schützt davor
+// nicht: Auf dem Desktop ist es immer 12. Jede Zeile weniger ist also Chat, der sichtbar bleibt.
+const BAND_MAX_ZEILEN = 5
 
 const kurz = (text: string) => {
   const zeile = text.split('\n')[0].trim()
@@ -213,7 +216,7 @@ function zeileAus(stand: Stand, jetzt: number, geprueftAm?: number): BandZeile |
   const basis = { name: stand.name, zustand: stand.zustand, prozent, skill }
 
   if (stand.zustand === 'wartet') {
-    return { ...basis, zustand: 'wartet', zeichen: '❓', text: stand.notiz || 'wartet auf dich', antwortbar: stand.blockiert === true }
+    return { ...basis, zustand: 'wartet', zeichen: '❓', text: stand.notiz || 'wartet auf dich' }
   }
   if (stand.zustand === 'fertig') {
     // Runde zu Ende, Liste aber nicht: das ist kein Fertig, sondern eine Pause.
@@ -239,6 +242,15 @@ const REIHENFOLGE = ['❓', '⚠️', '🔄', '⏸️', '☑️', '✅']
 // Für den Dateikonflikt zählt alles, was der Master noch nicht geprüft hat: Wer eben eine Datei überschrieben
 // und sich fertig gemeldet hat, ist der gefährlichste Fall. Erst ✅ oder das Ausblenden nimmt eine Session heraus.
 const UNGEPRUEFT = ['❓', '⚠️', '🔄', '⏸️', '☑️']
+
+// Die Zeilen sind nach Dringlichkeit sortiert: Passen nicht alle ins Band, fällt das Unwichtigste in eine Sammelzeile.
+function bandZeilen(zeilen: BandZeile[], platz: number) {
+  if (zeilen.length <= platz) return { sichtbar: zeilen, rest: '' }
+  const sichtbar = zeilen.slice(0, Math.max(platz - 1, 0))
+  const uebrig = zeilen.slice(sichtbar.length)
+  const zeichen = REIHENFOLGE.filter(z => uebrig.some(s => s.zeichen === z)).map(z => `${z}${uebrig.filter(s => s.zeichen === z).length}`)
+  return { sichtbar, rest: `… ${sichtbar.length ? 'und ' : ''}${uebrig.length} weitere: ${zeichen.join(' ')}` }
+}
 
 function konflikteAus(sessions: { name: string; pfade: string[] }[]): BandKonflikt[] {
   const wer = new Map<string, string[]>()
@@ -305,7 +317,7 @@ async function bandAktualisieren($: EngineInterface, takt: Takt, kennung: string
         const zeile = zeileAus(stand, jetzt, geprueft[sessionId])
         if (!zeile) continue
         const zusatz = await jsonOderNichts<Zusatz>($, `${heim}${ZUSATZ}/${datei.name}`)
-        zeilen.push(zusatz?.hostId ? { ...zeile, ziel: zusatz.hostId } : zeile)
+        zeilen.push(zeile)
         if (UNGEPRUEFT.includes(zeile.zeichen) && Array.isArray(zusatz?.pfade)) ungeprueft.push({ name: stand.name, pfade: zusatz.pfade })
       }
     }
@@ -316,7 +328,6 @@ async function bandAktualisieren($: EngineInterface, takt: Takt, kennung: string
     const neu: BandStand = {
       eigenerSchritt,
       zeilen,
-      kennung,
       offen,
       ...(master?.projekt ? { projekt: master.projekt } : {}),
       ...(takt.limit !== undefined ? { limit: takt.limit } : {}),
@@ -553,21 +564,6 @@ async function netzPruefen($: EngineInterface, kennung: string, antwort: string)
   const datei = await offenLesen($, kennung)
   nachholenAnfuegen(datei, stelle)
   await offenSchreiben($, kennung, datei)
-}
-
-// Ein Knopf im Band: ruft einen Dienst der App auf und sagt in einem Toast, was daraus wurde.
-async function knopfAufruf($: EngineInterface, server: string, werkzeug: string, args: Record<string, unknown>, gelungen: string) {
-  try {
-    const antwort = await $.mcp.call(server, werkzeug, args)
-    if (!antwort.isError) {
-      $.ui.toast(gelungen)
-      return
-    }
-    const block = antwort.content.find(c => (c as { type?: string }).type === 'text') as { text?: string } | undefined
-    $.ui.toast(`Ging nicht: ${(block?.text ?? werkzeug).slice(0, 120)}`)
-  } catch {
-    $.ui.toast(`Ging nicht: ${werkzeug} ist hier nicht erreichbar`)
-  }
 }
 
 const geaenderterPfad = (werkzeug: string, ein: Record<string, unknown>) => {
@@ -1121,8 +1117,8 @@ export const register: Register = on => {
     const stand = await read($, band)
     if (stand === null || e.props.hasSurvey) return next(e)
 
-    // Das Band gibt es nur im Terminal und auf dem Desktop; beide haben Eingabefeld und Auswahl.
-    const { Box, Button, Input, Select, Text } = $.ui.resolve(e) as unknown as ElementTable<'desktop'>
+    // Reine Anzeige: Antworten, Stoppen und Steuern laufen über das Textfeld des Dirigenten.
+    const { Box, Text } = $.ui.resolve(e)
     const breite = e.props.bodyColumns
     const mitBalken = breite >= 56
     const anzeige = (prozent: number | null | undefined) =>
@@ -1156,15 +1152,8 @@ export const register: Register = on => {
       ? `${konflikt.datei}${konflikte.length > 1 ? ` und ${konflikte.length - 1} weitere` : ''}`
       : ''
 
-    // Knöpfe stehen unter allen Stand-Zeilen und nur, wenn alle Stand-Zeilen trotzdem ganz sichtbar bleiben.
-    const ziele = stand.zeilen.filter(z => z.ziel)
-    const gewaehlt = await read($, auswahl)
-    const ziel = ziele.find(z => z.ziel === gewaehlt) ?? ziele.find(z => z.zeichen === '❓')
-    const standZeilen = 1 + (konflikt ? 1 : 0) + Math.max(stand.zeilen.length, 1)
-    const knoepfe = e.surface === 'desktop' && ziele.length > 0 && breite >= 36 && standZeilen < e.props.maxRows
-    const mitFeld = knoepfe && ziel?.zeichen === '❓' && ziel.antwortbar === true && standZeilen + 1 < e.props.maxRows
-    const zielId = ziel?.ziel ?? ''
-    const zielName = ziel?.name ?? ''
+    const platz = Math.max(Math.min(BAND_MAX_ZEILEN, e.props.maxRows) - 1 - (konflikt ? 1 : 0), 1)
+    const { sichtbar, rest } = bandZeilen(stand.zeilen, platz)
 
     return (
       <Box flexDirection="column">
@@ -1173,15 +1162,14 @@ export const register: Register = on => {
           {links.slice(1).map(teil =>
             teil === limitWarnung ? <Text bold color="warning">{`  ${teil}`}</Text> : `  ${teil}`,
           )}
-          {`  ${knapp(eigen, textPlatz)}`}
+          {`  ${knapp(eigen, textPlatz)}${stand.zeilen.length === 0 ? ' · keine Arbeits-Session' : ''}`}
         </Text>
         {konflikt ? (
           <Text wrap="truncate-end" bold color="warning">
             ⚠️ Dateikonflikt {konflikt.sessions.join(' + ')}: {konfliktText}
           </Text>
         ) : null}
-        {stand.zeilen.length === 0 ? <Text dimColor>Keine Arbeits-Session aktiv</Text> : null}
-        {stand.zeilen.map(z => {
+        {sichtbar.map(z => {
           const vorn = [`${z.zeichen} ${[z.name, z.skill, anzeige(z.prozent)].filter(Boolean).join(' ')}`, z.vorsatz].filter(Boolean).join(' · ')
 
           return (
@@ -1190,53 +1178,7 @@ export const register: Register = on => {
             </Text>
           )
         })}
-        {knoepfe ? (
-          <Box flexDirection="row" columnGap={1}>
-            <Select
-              key="auswahl"
-              options={[
-                ...(ziel ? [] : [{ value: '', label: 'Session wählen' }]),
-                ...ziele.map(z => ({ value: z.ziel ?? '', label: z.name })),
-              ]}
-              value={zielId}
-              onSelect={wert => {
-                void update($, auswahl, () => wert || null)
-              }}
-            />
-            {ziel ? (
-              <Button
-                key="oeffnen"
-                label="Öffnen"
-                onPress={() => knopfAufruf($, 'ccd_window', 'open_session_in', { session_id: zielId, target: 'split' }, `${zielName} ist geöffnet`)}
-              />
-            ) : null}
-            {ziel && ziel.zustand !== 'fertig' ? (
-              <Button
-                key="stoppen"
-                label="Stoppen"
-                onPress={() => knopfAufruf($, 'ccd_session_mgmt', 'stop_session', { session_id: zielId }, `${zielName} ist gestoppt`)}
-              />
-            ) : null}
-          </Box>
-        ) : null}
-        {mitFeld ? (
-          <Input
-            key={`antwort-${zielId}`}
-            placeholder={`Antwort an ${zielName}`}
-            submitLabel="senden"
-            onSubmit={wert => {
-              const text = wert.trim()
-              if (!text) return
-              void knopfAufruf(
-                $,
-                'ccd_session_mgmt',
-                'send_message',
-                { session_id: zielId, message: `⟦dirigent:${zielName}@${stand.kennung ?? ''}⟧ Antwort des Nutzers aus dem Band: "${text}"` },
-                `Antwort an ${zielName} geschickt`,
-              )
-            }}
-          />
-        ) : null}
+        {rest ? <Text wrap="truncate-end" dimColor>{rest}</Text> : null}
       </Box>
     )
   })

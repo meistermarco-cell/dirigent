@@ -9,10 +9,6 @@ export type BandZeile = {
   /** Steht ungekürzt vor dem Text, zum Beispiel wie lange eine Session schon still ist. */
   vorsatz?: string
   text: string
-  /** `local_…`-Id der Session für die Knöpfe; fehlt außerhalb der Desktop-App. */
-  ziel?: string
-  /** Die Session hat ihre Runde mit einer Frage beendet; eine Nachricht beantwortet sie. */
-  antwortbar?: boolean
 }
 
 export type BandKonflikt = {
@@ -26,7 +22,6 @@ export type BandStand = {
   zeilen: BandZeile[]
   /** Name des übergeordneten Projekts; fehlt, solange der Master nicht benannt ist. */
   projekt?: string
-  kennung?: string
   /** Anzahl offener Punkte aus `~/.claude/dirigent/offen/`. */
   offen?: number
   /** 5-Stunden-Limit in Prozent; fehlt, wenn die Abfrage scheitert. */
@@ -37,6 +32,6 @@ export type BandStand = {
 
 declare module 'claude-code' {
   interface PluginState {
-    dirigent: { band: BandStand | null; auswahl: string | null }
+    dirigent: { band: BandStand | null }
   }
 }
