@@ -4,19 +4,39 @@ export type BandZeile = {
   zeichen: string
   /** Erledigte Schritte in Prozent; null, solange die Session keine Liste hat. */
   prozent: number | null
+  /** Skill der Session: `[name]` geladen, `[name?]` zugewiesen, aber noch nicht geladen. */
+  skill?: string
   /** Steht ungekürzt vor dem Text, zum Beispiel wie lange eine Session schon still ist. */
   vorsatz?: string
   text: string
+  /** `local_…`-Id der Session für die Knöpfe; fehlt außerhalb der Desktop-App. */
+  ziel?: string
+  /** Die Session hat ihre Runde mit einer Frage beendet; eine Nachricht beantwortet sie. */
+  antwortbar?: boolean
+}
+
+export type BandKonflikt = {
+  datei: string
+  sessions: string[]
 }
 
 export type BandStand = {
   /** Was der Dirigent selbst gerade tut (aktueller Schritt seiner Liste), falls bekannt. */
   eigenerSchritt: string
   zeilen: BandZeile[]
+  /** Name des übergeordneten Projekts; fehlt, solange der Master nicht benannt ist. */
+  projekt?: string
+  kennung?: string
+  /** Anzahl offener Punkte aus `~/.claude/dirigent/offen/`. */
+  offen?: number
+  /** 5-Stunden-Limit in Prozent; fehlt, wenn die Abfrage scheitert. */
+  limit?: number
+  /** Dateien, die mehrere noch nicht geprüfte Sessions dieses Masters geändert haben. */
+  konflikte?: BandKonflikt[]
 }
 
 declare module 'claude-code' {
   interface PluginState {
-    dirigent: { band: BandStand | null }
+    dirigent: { band: BandStand | null; auswahl: string | null }
   }
 }

@@ -1,7 +1,20 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { ElementTable, EngineInterface, Register } from 'claude-code'
 
-import type { BandStand, BandZeile } from '../types'
+import type { BandKonflikt, BandStand, BandZeile } from '../types'
+import {
+  nachholenAnfuegen,
+  nochOffen,
+  offenAnzeichen,
+  offenDatei,
+  offenKontext,
+  offenLesen,
+  offenSchreiben,
+  punktMerken,
+  punktSchliessen,
+} from './offen'
+import { aenderungSchreiben, auftragLesen, ausblendenBefehl, hinweisSchreiben, nutzungLesen, nutzungSchreiben, nutzungUmziehen, skillsLage } from './skills'
+import type { Nutzung } from './skills'
 
 // Steht in jedem Auftrag, den ein Master an eine Arbeits-Session schickt: `⟦dirigent:<name>@<kennung>⟧`.
 // Die Kennung sagt, zu welchem Dirigenten die Session gehört; jede Session kann ihren eigenen haben.
@@ -13,8 +26,17 @@ const marke = (kennung: string) => `⟦dirigent:<name>@${kennung}⟧`
 // `$.store` ist eine Datei für alle Sessions. Darin pro Dirigent `master:<kennung>` und pro
 // Arbeits-Session `rolle:<sessionId>`. Die Kennung bleibt über ein Bereinigen (/clear) gleich,
 // die Session-Id des Masters nicht.
-type Master = { kennung: string; sessionId: string; seit: string }
-type Rolle = { name: string; kennung: string }
+// Die Session-Id wechselt auch, wenn die App eine Session nach einem Neustart fortsetzt. Dauerhaft ist nur die
+// Host-Id der App (`local_…`); sie erkennt eine Session wieder. Im Terminal gibt es keine.
+type Master = { kennung: string; sessionId: string; seit: string; projekt?: string; hostId?: string }
+type Rolle = { name: string; kennung: string; hostId?: string }
+
+// Titel der Master-Session: `🎼 <Projekt>`, höchstens 40 Zeichen Projektname, ein vorhandenes 🎼 fällt weg.
+function projektName(roh: unknown) {
+  const name = String(roh ?? '').replace(/🎼\uFE0F?/gu, '').replace(/\s+/g, ' ').trim()
+
+  return name.length > 40 ? `${name.slice(0, 39).trimEnd()}…` : name
+}
 
 // Hilfsfunktionen, die `$` bekommen, müssen auf oberster Ebene stehen; sonst lehnt die Engine die Mod ab.
 async function alleMaster($: EngineInterface) {
@@ -27,6 +49,15 @@ async function alleMaster($: EngineInterface) {
 
 async function meinMaster($: EngineInterface, sessionId: string) {
   return (await alleMaster($)).find(m => m.sessionId === sessionId)
+}
+
+async function hostIdLesen($: EngineInterface) {
+  try {
+    const id = await $.env.get('CLAUDE_CODE_HOST_SESSION_ID')
+    return id?.startsWith('local_') ? id : undefined
+  } catch {
+    return undefined
+  }
 }
 
 // Frühere Fassung: ein einziger globaler Master und Rollen als Text. In das neue Format übernehmen.
@@ -61,18 +92,62 @@ type Stand = {
   schritte: Schritt[]
   notiz: string
   zuletzt: number
+  geladen?: string[]
+  zugewiesen?: string[]
+  /** Die Runde endete mit einer Frage: `wartet` ist dann eine Nachricht wert, keine Karte. */
+  blockiert?: boolean
 }
 
-type Eigenes = { schritte: Schritt[]; notiz: string; zustand: Zustand; blockiert: boolean; gemeldet: number }
+// Was nur die Mod weiß, in einer eigenen Datei: ein Einstellungs-Hook, der die Stand-Datei mitschreibt,
+// überschreibt dort jedes Feld, das er nicht kennt.
+type Zusatz = { hostId?: string; pfade?: string[] }
+
+type Eigenes = {
+  schritte: Schritt[]
+  notiz: string
+  zustand: Zustand
+  blockiert: boolean
+  gemeldet: number
+  auftrag: string
+  zugewiesen: string[]
+  geladen: { skill: string; zeit: number }[]
+  /** Für diese Session-Id ist der Stand schon wiederhergestellt. */
+  fuer?: string
+  hostId?: string
+  pfade: string[]
+  zusatzGeschrieben?: string
+  wartetAufFreigabe: boolean
+  offenGemerkt: boolean
+}
+
+const neuesEigenes = (): Eigenes => ({
+  schritte: [],
+  notiz: '',
+  zustand: 'fertig',
+  blockiert: false,
+  gemeldet: 0,
+  auftrag: '',
+  zugewiesen: [],
+  geladen: [],
+  pfade: [],
+  wartetAufFreigabe: false,
+  offenGemerkt: false,
+})
 
 const band = atom({ plugin: 'dirigent', key: 'band' } as const, null)
+const auswahl = atom({ plugin: 'dirigent', key: 'auswahl' } as const, null)
 
 const MINUTE = 60_000
-const FERTIG_SICHTBAR = 30 * MINUTE
+const GEPRUEFT_SICHTBAR = 30 * MINUTE
 const STILL_AB = 20 * MINUTE
 const VERSCHWINDET_NACH = 24 * 60 * MINUTE
+const LESEFRIST = 7 * VERSCHWINDET_NACH
 const HERZSCHLAG = 15_000
 const ORDNER = '/.claude/dirigent/stand'
+const ZUSATZ = '/.claude/dirigent/zusatz'
+const GEPRUEFT = '/.claude/dirigent/geprueft'
+const PFADE_MAX = 200
+const LIMIT_WARNUNG = 80
 
 const kurz = (text: string) => {
   const zeile = text.split('\n')[0].trim()
@@ -123,55 +198,130 @@ const balken = (prozent: number) => {
   return '▰'.repeat(voll) + '▱'.repeat(5 - voll)
 }
 
-function zeileAus(stand: Stand, jetzt: number): BandZeile | undefined {
+function zeileAus(stand: Stand, jetzt: number, geprueftAm?: number): BandZeile | undefined {
   if (stand.zustand === 'beendet') return undefined
   const alter = jetzt - stand.zuletzt
-  if (stand.zustand === 'fertig' && alter > FERTIG_SICHTBAR) return undefined
 
-  const aktiv = stand.schritte.find(s => s.status === 'in_progress')
-  const erledigt = stand.schritte.filter(s => s.status === 'completed').length
-  const prozent = stand.schritte.length ? Math.round((100 * erledigt) / stand.schritte.length) : null
-  const basis = { name: stand.name, zustand: stand.zustand, prozent }
+  const schritte = Array.isArray(stand.schritte) ? stand.schritte : []
+  const aktiv = schritte.find(s => s.status === 'in_progress')
+  const erledigt = schritte.filter(s => s.status === 'completed').length
+  const prozent = schritte.length ? Math.round((100 * erledigt) / schritte.length) : null
+  // Geladener Skill in Klammern; zugewiesen, aber noch nicht geladen, mit Fragezeichen.
+  const geladen = stand.geladen ?? []
+  const fehlt = (stand.zugewiesen ?? []).filter(s => !geladen.includes(s))
+  const skill = geladen[0] ? `[${geladen[0]}]` : fehlt[0] ? `[${fehlt[0]}?]` : undefined
+  const basis = { name: stand.name, zustand: stand.zustand, prozent, skill }
 
   if (stand.zustand === 'wartet') {
-    return { ...basis, zustand: 'wartet', zeichen: '❓', text: stand.notiz || 'wartet auf dich' }
+    return { ...basis, zustand: 'wartet', zeichen: '❓', text: stand.notiz || 'wartet auf dich', antwortbar: stand.blockiert === true }
   }
   if (stand.zustand === 'fertig') {
     // Runde zu Ende, Liste aber nicht: das ist kein Fertig, sondern eine Pause.
     if (prozent !== null && prozent < 100) {
       return { ...basis, zustand: 'fertig', zeichen: '⏸️', text: stand.notiz || aktiv?.text || 'pausiert' }
     }
-    return { ...basis, zustand: 'fertig', zeichen: '✅', text: stand.notiz || 'fertig' }
+    // Gemeldet ist nicht geprüft: nur was der Master nach der letzten Meldung angesehen hat, ist ✅ und darf gehen.
+    if (geprueftAm !== undefined && geprueftAm >= stand.zuletzt) {
+      if (jetzt - geprueftAm > GEPRUEFT_SICHTBAR) return undefined
+      return { ...basis, zustand: 'fertig', zeichen: '✅', text: stand.notiz || 'geprüft' }
+    }
+    return { ...basis, zustand: 'fertig', zeichen: '☑️', text: stand.notiz || 'fertig gemeldet' }
   }
+  // Abgestürzt: niemand meldet sich mehr.
+  if (alter > VERSCHWINDET_NACH) return undefined
   if (alter > STILL_AB) {
     return { ...basis, zustand: 'arbeitet', zeichen: '⚠️', vorsatz: `${Math.round(alter / MINUTE)} Min. still`, text: aktiv?.text ?? 'keine Meldung' }
   }
   return { ...basis, zustand: 'arbeitet', zeichen: '🔄', text: aktiv?.text ?? 'arbeitet' }
 }
 
-const RANG: Record<BandZeile['zustand'], number> = { wartet: 0, arbeitet: 1, fertig: 2 }
+const REIHENFOLGE = ['❓', '⚠️', '🔄', '⏸️', '☑️', '✅']
+// Für den Dateikonflikt zählt alles, was der Master noch nicht geprüft hat: Wer eben eine Datei überschrieben
+// und sich fertig gemeldet hat, ist der gefährlichste Fall. Erst ✅ oder das Ausblenden nimmt eine Session heraus.
+const UNGEPRUEFT = ['❓', '⚠️', '🔄', '⏸️', '☑️']
 
-async function bandAktualisieren($: EngineInterface, kennung: string) {
+function konflikteAus(sessions: { name: string; pfade: string[] }[]): BandKonflikt[] {
+  const wer = new Map<string, string[]>()
+  for (const session of sessions) {
+    for (const pfad of session.pfade) wer.set(pfad, [...(wer.get(pfad) ?? []), session.name])
+  }
+  return [...wer.entries()]
+    .filter(([, namen]) => namen.length > 1)
+    .map(([pfad, namen]) => ({ datei: pfad.split('/').pop() ?? pfad, sessions: namen }))
+    .sort((a, b) => a.datei.localeCompare(b.datei))
+}
+
+async function jsonOderNichts<T>($: EngineInterface, pfad: string) {
+  try {
+    if (!(await $.fs.exists(pfad))) return undefined
+    return JSON.parse(await $.fs.read(pfad)) as T
+  } catch {
+    // Halb geschrieben oder kaputt: beim nächsten Mal.
+    return undefined
+  }
+}
+
+// Holt das 5-Stunden-Limit aus der Antwort von get_usage; alles andere heißt: nichts anzeigen.
+function fuenfStunden(antwort: { content: unknown[]; isError: boolean }) {
+  if (antwort.isError) return undefined
+  const block = antwort.content.find(c => (c as { type?: string }).type === 'text') as { text?: string } | undefined
+  const fenster = (JSON.parse(block?.text ?? '{}') as { plan?: { status?: string; windows?: { label?: string; percentUsed?: unknown }[] } }).plan
+  if (fenster?.status !== 'ok') return undefined
+  const wert = fenster.windows?.find(w => /5.?hour/i.test(w.label ?? ''))?.percentUsed
+  return typeof wert === 'number' ? Math.round(wert) : undefined
+}
+
+// Höchstens einmal pro Minute und unabhängig vom Takt: eine hängende Abfrage darf das Band nicht anhalten.
+async function limitHolen($: EngineInterface, takt: Takt, jetzt: number) {
+  if (takt.limitAbgefragt !== undefined && jetzt - takt.limitAbgefragt < MINUTE) return
+  takt.limitAbgefragt = jetzt
+  try {
+    takt.limit = fuenfStunden(await $.mcp.call('ccd_session_mgmt', 'get_usage', {}))
+  } catch {
+    takt.limit = undefined
+  }
+}
+
+async function bandAktualisieren($: EngineInterface, takt: Takt, kennung: string) {
   try {
     const heim = await $.env.get('HOME')
     const ordner = `${heim}${ORDNER}`
     const jetzt = await $.clock.now()
+    void limitHolen($, takt, jetzt)
+    const geprueft = (await jsonOderNichts<Record<string, number>>($, `${heim}${GEPRUEFT}/${kennung}.json`)) ?? {}
     const zeilen: BandZeile[] = []
+    const ungeprueft: { name: string; pfade: string[] }[] = []
     let eigenerSchritt = ''
     if (await $.fs.exists(ordner)) {
       for (const datei of await $.fs.list(ordner)) {
-        if (!datei.name.startsWith(`${kennung}-`) || jetzt - datei.mtimeMs > VERSCHWINDET_NACH) continue
-        const stand = JSON.parse(await $.fs.read(`${ordner}/${datei.name}`)) as Stand
+        if (!datei.name.startsWith(`${kennung}-`) || !datei.name.endsWith('.json') || jetzt - datei.mtimeMs > LESEFRIST) continue
+        const stand = await jsonOderNichts<Stand>($, `${ordner}/${datei.name}`)
+        if (!stand) continue
         if (stand.istMaster) {
-          if (stand.zustand === 'arbeitet') eigenerSchritt = stand.schritte.find(s => s.status === 'in_progress')?.text ?? ''
+          if (stand.zustand === 'arbeitet') eigenerSchritt = stand.schritte?.find(s => s.status === 'in_progress')?.text ?? ''
           continue
         }
-        const zeile = zeileAus(stand, jetzt)
-        if (zeile) zeilen.push(zeile)
+        const sessionId = datei.name.slice(kennung.length + 1, -'.json'.length)
+        const zeile = zeileAus(stand, jetzt, geprueft[sessionId])
+        if (!zeile) continue
+        const zusatz = await jsonOderNichts<Zusatz>($, `${heim}${ZUSATZ}/${datei.name}`)
+        zeilen.push(zusatz?.hostId ? { ...zeile, ziel: zusatz.hostId } : zeile)
+        if (UNGEPRUEFT.includes(zeile.zeichen) && Array.isArray(zusatz?.pfade)) ungeprueft.push({ name: stand.name, pfade: zusatz.pfade })
       }
     }
-    zeilen.sort((a, b) => RANG[a.zustand] - RANG[b.zustand] || a.name.localeCompare(b.name))
-    const neu: BandStand = { eigenerSchritt, zeilen }
+    zeilen.sort((a, b) => REIHENFOLGE.indexOf(a.zeichen) - REIHENFOLGE.indexOf(b.zeichen) || a.name.localeCompare(b.name))
+    const master = (await $.store.get(`master:${kennung}`)) as Master | undefined
+    const offen = nochOffen(await offenLesen($, kennung)).length
+    const konflikte = konflikteAus(ungeprueft)
+    const neu: BandStand = {
+      eigenerSchritt,
+      zeilen,
+      kennung,
+      offen,
+      ...(master?.projekt ? { projekt: master.projekt } : {}),
+      ...(takt.limit !== undefined ? { limit: takt.limit } : {}),
+      ...(konflikte.length ? { konflikte } : {}),
+    }
     const alt = await read($, band)
     if (JSON.stringify(alt) !== JSON.stringify(neu)) await update($, band, () => neu)
   } catch {
@@ -180,13 +330,13 @@ async function bandAktualisieren($: EngineInterface, kennung: string) {
 }
 
 // Hält den einen Takt, der das Band des Masters neu liest.
-type Takt = { uhr?: { cancel: () => void } }
+type Takt = { uhr?: { cancel: () => void }; limit?: number; limitAbgefragt?: number }
 
 async function bandStarten($: EngineInterface, takt: Takt, kennung: string) {
   takt.uhr?.cancel()
-  await bandAktualisieren($, kennung)
+  await bandAktualisieren($, takt, kennung)
   takt.uhr = $.clock.every(3000, () => {
-    void bandAktualisieren($, kennung)
+    void bandAktualisieren($, takt, kennung)
   })
 }
 
@@ -209,39 +359,390 @@ async function melden($: EngineInterface, eigenes: Eigenes) {
       schritte: eigenes.schritte,
       notiz: eigenes.notiz,
       zuletzt: jetzt,
+      geladen: eigenes.geladen.map(g => g.skill),
+      zugewiesen: eigenes.zugewiesen,
+      blockiert: eigenes.blockiert,
     }
     const heim = await $.env.get('HOME')
     await $.fs.write(`${heim}${ORDNER}/${kennung}-${sessionId}.json`, JSON.stringify(stand))
+
+    if (eigenes.hostId === undefined) eigenes.hostId = (await hostIdLesen($)) ?? ''
+    const zusatz: Zusatz = { pfade: eigenes.pfade, ...(eigenes.hostId ? { hostId: eigenes.hostId } : {}) }
+    const text = JSON.stringify(zusatz)
+    if (text !== eigenes.zusatzGeschrieben) {
+      await $.fs.write(`${heim}${ZUSATZ}/${kennung}-${sessionId}.json`, text)
+      eigenes.zusatzGeschrieben = text
+    }
   } catch {
     // Melden darf die Arbeit nie aufhalten.
   }
+}
+
+// Sucht den Eintrag, den diese Session unter ihrer früheren Id hinterlassen hat: zuerst über die Host-Id im
+// Eintrag; ältere Einträge haben keine und werden über ihre Zusatz-Datei erkannt. Eine fremde Host-Id zählt nie.
+async function fruehererEintrag($: EngineInterface, hostId: string) {
+  const heim = await $.env.get('HOME')
+  const master = await alleMaster($)
+  const rollen: { id: string; rolle: Rolle }[] = []
+  for (const k of await $.store.keys()) {
+    if (!k.startsWith('rolle:')) continue
+    const rolle = (await $.store.get(k)) as Rolle
+    if (rolle && typeof rolle === 'object' && master.some(m => m.kennung === rolle.kennung)) rollen.push({ id: k.slice('rolle:'.length), rolle })
+  }
+  const passt = async (kennung: string, id: string) =>
+    (await jsonOderNichts<Zusatz>($, `${heim}${ZUSATZ}/${kennung}-${id}.json`))?.hostId === hostId
+
+  const direkt = master.find(m => m.hostId === hostId)
+  if (direkt) return { master: direkt }
+  const direkteRolle = rollen.find(r => r.rolle.hostId === hostId)
+  if (direkteRolle) return direkteRolle
+  for (const m of master) if (!m.hostId && (await passt(m.kennung, m.sessionId))) return { master: m }
+  for (const r of rollen) if (!r.rolle.hostId && (await passt(r.rolle.kennung, r.id))) return r
+  return undefined
+}
+
+// Übernimmt Stand, Zusatz, Prüfung und Protokoll der alten Id. Die alten Dateien bleiben als `beendet` und leer
+// zurück: `$.fs` kann nichts löschen, und so steht die Session nicht zweimal im Band.
+async function umziehen($: EngineInterface, kennung: string, alteId: string, neueId: string) {
+  const heim = await $.env.get('HOME')
+  const standAlt = `${heim}${ORDNER}/${kennung}-${alteId}.json`
+  const standNeu = `${heim}${ORDNER}/${kennung}-${neueId}.json`
+  const stand = await jsonOderNichts<Stand>($, standAlt)
+  if (stand) {
+    // Ein Einstellungs-Hook kann unter der neuen Id schon eine Liste geschrieben haben; sie ist dann die neuere.
+    if (!(await jsonOderNichts<Stand>($, standNeu))?.schritte?.length) await $.fs.write(standNeu, JSON.stringify(stand))
+    await $.fs.write(standAlt, JSON.stringify({ ...stand, zustand: 'beendet' }))
+  }
+
+  const zusatzAlt = `${heim}${ZUSATZ}/${kennung}-${alteId}.json`
+  const zusatz = await jsonOderNichts<Zusatz>($, zusatzAlt)
+  if (zusatz) {
+    await $.fs.write(`${heim}${ZUSATZ}/${kennung}-${neueId}.json`, JSON.stringify(zusatz))
+    await $.fs.write(zusatzAlt, JSON.stringify({ pfade: [] }))
+  }
+
+  const pruefPfad = `${heim}${GEPRUEFT}/${kennung}.json`
+  const geprueft = await jsonOderNichts<Record<string, number>>($, pruefPfad)
+  if (geprueft?.[alteId] !== undefined) {
+    geprueft[neueId] = geprueft[alteId]
+    delete geprueft[alteId]
+    await $.fs.write(pruefPfad, JSON.stringify(geprueft))
+  }
+
+  await nutzungUmziehen($, alteId, neueId)
+}
+
+// Erkennt diese Session über die Host-Id wieder, wenn ihre Session-Id keinen Eintrag mehr hat, und zieht alles
+// unter die neue Id um. Danach läuft sie weiter, als wäre nichts gewesen. Ohne Host-Id geschieht nichts.
+async function wiedererkennen($: EngineInterface, sessionId: string) {
+  try {
+    const hostId = await hostIdLesen($)
+    if (!hostId) return undefined
+    const master = await meinMaster($, sessionId)
+    if (master) {
+      if (master.hostId !== hostId) await $.store.set(`master:${master.kennung}`, { ...master, hostId } satisfies Master)
+      return undefined
+    }
+    const rolle = (await $.store.get(`rolle:${sessionId}`)) as Rolle | undefined
+    if (rolle) {
+      if (rolle.hostId !== hostId) await $.store.set(`rolle:${sessionId}`, { ...rolle, hostId } satisfies Rolle)
+      return undefined
+    }
+
+    const frueher = await fruehererEintrag($, hostId)
+    if (!frueher) return undefined
+    if ('master' in frueher && frueher.master) {
+      await umziehen($, frueher.master.kennung, frueher.master.sessionId, sessionId)
+      const neu: Master = { ...frueher.master, sessionId, hostId }
+      await $.store.set(`master:${neu.kennung}`, neu)
+      return neu
+    }
+    if ('rolle' in frueher && frueher.rolle) {
+      await umziehen($, frueher.rolle.kennung, frueher.id, sessionId)
+      await $.store.set(`rolle:${sessionId}`, { ...frueher.rolle, hostId } satisfies Rolle)
+      await $.store.delete(`rolle:${frueher.id}`)
+    }
+    return undefined
+  } catch {
+    // Dann bleibt die Session unerkannt, arbeitet aber ungestört.
+    return undefined
+  }
+}
+
+// Nimmt den eigenen Stand nach einem Neustart oder Neuladen wieder auf. Die Session-Id steckt im Dateinamen:
+// eine neue Session (auch nach /clear) findet nichts. Was gerade lief, läuft jetzt nicht mehr.
+async function wiederherstellen($: EngineInterface, eigenes: Eigenes, sessionId: string) {
+  eigenes.fuer = sessionId
+  try {
+    const nutzung = await nutzungLesen($, sessionId).catch(() => undefined)
+    if (nutzung) {
+      if (Array.isArray(nutzung.geladen)) eigenes.geladen = nutzung.geladen
+      if (Array.isArray(nutzung.zugewiesen)) eigenes.zugewiesen = nutzung.zugewiesen
+      if (typeof nutzung.auftrag === 'string') eigenes.auftrag = nutzung.auftrag
+    }
+
+    const master = await meinMaster($, sessionId)
+    const rolle = (await $.store.get(`rolle:${sessionId}`)) as Rolle | undefined
+    const kennung = master?.kennung ?? rolle?.kennung
+    if (!kennung) return
+    const heim = await $.env.get('HOME')
+    const stand = await jsonOderNichts<Stand>($, `${heim}${ORDNER}/${kennung}-${sessionId}.json`)
+    const zusatz = await jsonOderNichts<Zusatz>($, `${heim}${ZUSATZ}/${kennung}-${sessionId}.json`)
+    if (Array.isArray(zusatz?.pfade)) eigenes.pfade = zusatz.pfade
+    if (!stand) return
+
+    if (Array.isArray(stand.schritte)) eigenes.schritte = stand.schritte
+    if (typeof stand.notiz === 'string') eigenes.notiz = stand.notiz
+    if (eigenes.geladen.length === 0 && Array.isArray(stand.geladen)) {
+      eigenes.geladen = stand.geladen.map(skill => ({ skill, zeit: stand.zuletzt }))
+    }
+    if (eigenes.zugewiesen.length === 0 && Array.isArray(stand.zugewiesen)) eigenes.zugewiesen = stand.zugewiesen
+    eigenes.blockiert = stand.blockiert === true
+    eigenes.zustand = eigenes.blockiert ? 'wartet' : 'fertig'
+    // Unverändert nicht schreiben: `zuletzt` bliebe sonst nicht die Zeit der letzten Meldung, und ✅ fiele auf ☑️ zurück.
+    if (stand.zustand !== eigenes.zustand) await melden($, eigenes)
+  } catch {
+    // Dann beginnt die Session eben leer.
+  }
+}
+
+// Setzt ✅ für die laufenden Stände mit diesem Namen. Eine Datei je Master; außer ihm ändert sie nur `umziehen`.
+async function geprueftSetzen($: EngineInterface, takt: Takt, kennung: string, name: string) {
+  const heim = await $.env.get('HOME')
+  const ordner = `${heim}${ORDNER}`
+  const jetzt = await $.clock.now()
+  const pfad = `${heim}${GEPRUEFT}/${kennung}.json`
+  const geprueft = (await jsonOderNichts<Record<string, number>>($, pfad)) ?? {}
+  const namen: string[] = []
+  const treffer: string[] = []
+  let nochNicht: BandZeile | undefined
+  for (const datei of (await $.fs.exists(ordner)) ? await $.fs.list(ordner) : []) {
+    if (!datei.name.startsWith(`${kennung}-`) || !datei.name.endsWith('.json') || jetzt - datei.mtimeMs > LESEFRIST) continue
+    const stand = await jsonOderNichts<Stand>($, `${ordner}/${datei.name}`)
+    if (!stand || stand.istMaster) continue
+    const zeile = zeileAus(stand, jetzt)
+    if (!zeile) continue
+    namen.push(stand.name)
+    if (stand.name !== name) continue
+    if (zeile.zeichen === '☑️') treffer.push(datei.name.slice(kennung.length + 1, -'.json'.length))
+    else nochNicht = zeile
+  }
+  if (treffer.length === 0) {
+    if (nochNicht) return `${name} ist noch nicht fertig gemeldet (${nochNicht.zeichen} ${nochNicht.text}); nichts geändert.`
+    return `Keine Session „${name}“ ist fertig gemeldet. Im Band stehen: ${namen.join(', ') || 'keine'}.`
+  }
+  for (const sessionId of treffer) geprueft[sessionId] = jetzt
+  for (const [id, zeit] of Object.entries(geprueft)) if (jetzt - zeit > LESEFRIST) delete geprueft[id]
+  await $.fs.write(pfad, JSON.stringify(geprueft))
+  await bandAktualisieren($, takt, kennung)
+  return `${name} ist geprüft (✅) und verschwindet nach 30 Minuten aus dem Band.`
+}
+
+// Kurzfassung der offenen Punkte für eine Nachricht; die Erinnerung ans Nachholen gilt genau einmal.
+async function offenFuerNachricht($: EngineInterface, kennung: string) {
+  const datei = await offenLesen($, kennung)
+  const kontext = offenKontext(datei, kennung)
+  if (datei.nachholen.length > 0 && datei.defekt === undefined) await offenSchreiben($, kennung, { ...datei, nachholen: [] })
+  return kontext
+}
+
+// Prüft am Ende einer Master-Runde, ob die Antwort etwas Offenes anspricht. Trägt nie selbst etwas ein.
+async function netzPruefen($: EngineInterface, kennung: string, antwort: string) {
+  const stelle = offenAnzeichen(antwort)
+  if (!stelle) return
+  const datei = await offenLesen($, kennung)
+  nachholenAnfuegen(datei, stelle)
+  await offenSchreiben($, kennung, datei)
+}
+
+// Ein Knopf im Band: ruft einen Dienst der App auf und sagt in einem Toast, was daraus wurde.
+async function knopfAufruf($: EngineInterface, server: string, werkzeug: string, args: Record<string, unknown>, gelungen: string) {
+  try {
+    const antwort = await $.mcp.call(server, werkzeug, args)
+    if (!antwort.isError) {
+      $.ui.toast(gelungen)
+      return
+    }
+    const block = antwort.content.find(c => (c as { type?: string }).type === 'text') as { text?: string } | undefined
+    $.ui.toast(`Ging nicht: ${(block?.text ?? werkzeug).slice(0, 120)}`)
+  } catch {
+    $.ui.toast(`Ging nicht: ${werkzeug} ist hier nicht erreichbar`)
+  }
+}
+
+const geaenderterPfad = (werkzeug: string, ein: Record<string, unknown>) => {
+  const pfad = werkzeug === 'Write' || werkzeug === 'Edit' ? ein.file_path : werkzeug === 'NotebookEdit' ? ein.notebook_path : undefined
+  return typeof pfad === 'string' && pfad.startsWith('/') ? pfad : undefined
+}
+
+// Merkt, welche Datei diese Session geändert hat. Ein abgelehnter Aufruf hat nichts geändert.
+async function pfadMerken($: EngineInterface, eigenes: Eigenes, werkzeug: string, ein: Record<string, unknown>, antwort: unknown) {
+  const pfad = geaenderterPfad(werkzeug, ein)
+  const ergebnis = antwort as { deny?: unknown; isError?: unknown } | undefined
+  if (!pfad || ergebnis?.deny || ergebnis?.isError || eigenes.pfade.includes(pfad)) return
+  eigenes.pfade = [...eigenes.pfade, pfad].slice(-PFADE_MAX)
+  await melden($, eigenes)
+}
+
+// Schreibt das Skill-Protokoll dieser Session. Sessions ohne Dirigent zählen nur, wenn sie einen Skill geladen haben.
+async function protokollieren($: EngineInterface, eigenes: Eigenes) {
+  try {
+    const sessionId = await $.session.id()
+    const master = await meinMaster($, sessionId)
+    const rolle = (await $.store.get(`rolle:${sessionId}`)) as Rolle | undefined
+    const kennung = master?.kennung ?? rolle?.kennung ?? null
+    if (!kennung && eigenes.geladen.length === 0) return
+
+    const offen = eigenes.schritte.some(s => s.status !== 'completed')
+    const ergebnis: Nutzung['ergebnis'] = eigenes.zustand === 'arbeitet' ? 'laeuft' : offen ? 'pausiert' : 'fertig'
+    await nutzungSchreiben($, {
+      sessionId,
+      kennung,
+      name: master ? 'Dirigent' : (rolle?.name ?? null),
+      auftrag: eigenes.auftrag,
+      zugewiesen: eigenes.zugewiesen,
+      geladen: eigenes.geladen,
+      ergebnis,
+      zuletzt: await $.clock.now(),
+    })
+  } catch {
+    // Das Protokoll darf die Arbeit nie aufhalten.
+  }
+}
+
+// Meldet die Werkzeuge der Mod an und bringt alte Einträge in `$.store` in das heutige Format.
+async function startVorbereiten($: EngineInterface) {
+  await aufraeumen($)
+  await $.tool.register({
+    name: 'master_werden',
+    description:
+      'Macht diese Session zu einer Dirigent-Master-Session mit eigener Kennung; andere Dirigenten bleiben unberührt. Nur aufrufen, wenn der Skill dirigent das verlangt.',
+  })
+  await $.tool.register({
+    name: 'master_beenden',
+    description:
+      'Beendet den Dirigenten dieser Session: ihre Arbeits-Sessions gehören danach zu keinem Dirigenten mehr. Nur aufrufen, wenn der Nutzer den Dirigenten beenden will.',
+  })
+  await $.tool.register({
+    name: 'lage',
+    description:
+      'Dirigent: sagt, ob diese Session ein Master (mit Kennung und Auftrags-Marke) oder eine Arbeits-Session ist, und listet die Arbeits-Sessions dieses Masters.',
+  })
+
+  await $.tool.register({
+    name: 'master_benennen',
+    description:
+      'Dirigent: benennt diese Master-Session nach dem übergeordneten Projekt (Titel „🎼 <Projekt>“, Band-Kopfzeile). Nur für Master.',
+    inputSchema: {
+      type: 'object',
+      properties: { projekt: { type: 'string', description: 'Name des übergeordneten Projekts, höchstens 40 Zeichen' } },
+      required: ['projekt'],
+    },
+  })
+  await $.tool.register({
+    name: 'skills_lage',
+    description:
+      'Dirigent: listet alle Skills mit Nutzung und Erfolg, Aufträge ohne Skill, offene Hinweise und Kandidaten zum Aufräumen. Vor dem Zuweisen von Skills aufrufen.',
+  })
+  await $.tool.register({
+    name: 'skill_hinweis',
+    description:
+      'Dirigent: merkt sich, was an einem Skill fehlte oder falsch war, aus der Rückmeldung einer Session oder einer Korrektur des Nutzers. Ändert den Skill nicht.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        skill: { type: 'string', description: 'Name des Skills' },
+        art: { type: 'string', enum: ['korrektur', 'fehler', 'luecke'] },
+        text: { type: 'string', description: 'Ein Satz: was fehlte oder falsch war' },
+      },
+      required: ['skill', 'art', 'text'],
+    },
+  })
+  await $.tool.register({
+    name: 'skills_ausblenden',
+    description:
+      'Dirigent: baut den Befehl, mit dem der Nutzer selten genutzte Skills selbst ausblenden kann. Ändert nichts und führt nichts aus.',
+    inputSchema: {
+      type: 'object',
+      properties: { skills: { type: 'array', items: { type: 'string' } } },
+      required: ['skills'],
+    },
+  })
+  await $.tool.register({
+    name: 'offen_merken',
+    description:
+      'Dirigent: hält einen offenen Punkt aus dem Chat fest, damit er nicht verloren geht: eigener Vorschlag, unbeantwortete Frage, Zurückgestelltes, offene Frage aus einer Schlussmeldung. Nur für Master.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'Der Punkt in einem Satz, ohne den Chat verständlich' },
+        art: { type: 'string', enum: ['idee', 'frage', 'aufgabe', 'entscheidung'] },
+        quelle: { type: 'string', description: '„chat“ oder der Name der Session, aus deren Meldung der Punkt stammt' },
+      },
+      required: ['text', 'art'],
+    },
+  })
+  await $.tool.register({
+    name: 'offen_erledigen',
+    description:
+      'Dirigent: schließt einen offenen Punkt. Nur mit Beleg (erledigt) oder auf das Wort des Nutzers (verworfen). Nur für Master.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Id des Punkts, zum Beispiel p3' },
+        status: { type: 'string', enum: ['erledigt', 'verworfen'], description: 'Ohne Angabe: erledigt' },
+        grund: { type: 'string', description: 'Der Beleg (Datei, Commit, Ergebnis) oder die Worte des Nutzers' },
+      },
+      required: ['id', 'grund'],
+    },
+  })
+  await $.tool.register({
+    name: 'offen_liste',
+    description: 'Dirigent: listet die offenen Punkte dieses Masters, mit alle: true auch die geschlossenen samt Grund. Nur für Master.',
+    inputSchema: { type: 'object', properties: { alle: { type: 'boolean' } } },
+  })
+  await $.tool.register({
+    name: 'session_geprueft',
+    description:
+      'Dirigent: markiert eine fertig gemeldete Session (☑️) als geprüft (✅). Erst aufrufen, nachdem du ihr Ergebnis selbst angesehen hast. Nur für Master.',
+    inputSchema: {
+      type: 'object',
+      properties: { session: { type: 'string', description: 'Name der Session, wie ihn das Band zeigt' } },
+      required: ['session'],
+    },
+  })
+  await $.tool.register({
+    name: 'skill_aenderung',
+    description:
+      'Dirigent: merkt sich, dass ein Skill auf das Wort des Nutzers geändert wurde (Skill, Datum, Sicherungsordner), damit skills_lage die Wirkung vergleichen kann. Ändert selbst nichts.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        skill: { type: 'string', description: 'Name des Skills' },
+        sicherung: { type: 'string', description: 'Ordner mit dem Stand vor der Änderung' },
+        datum: { type: 'string', description: 'ISO-Datum der Änderung; ohne Angabe: jetzt' },
+      },
+      required: ['skill', 'sicherung'],
+    },
+  })
 }
 
 export const register: Register = on => {
   // Session-Id des Masters vor einem /clear. Danach läuft der Prozess unter einer neuen Id weiter.
   let vorDemBereinigen: string | undefined
   const takt: Takt = {}
-  const eigenes: Eigenes = { schritte: [], notiz: '', zustand: 'fertig', blockiert: false, gemeldet: 0 }
+  const eigenes = neuesEigenes()
 
   on('session.start', async ($, e, next) => {
-    await aufraeumen($)
-    await $.tool.register({
-      name: 'master_werden',
-      description:
-        'Macht diese Session zu einer Dirigent-Master-Session mit eigener Kennung; andere Dirigenten bleiben unberührt. Nur aufrufen, wenn der Skill dirigent das verlangt.',
-    })
-    await $.tool.register({
-      name: 'master_beenden',
-      description:
-        'Beendet den Dirigenten dieser Session: ihre Arbeits-Sessions gehören danach zu keinem Dirigenten mehr. Nur aufrufen, wenn der Nutzer den Dirigenten beenden will.',
-    })
-    await $.tool.register({
-      name: 'lage',
-      description:
-        'Dirigent: sagt, ob diese Session ein Master (mit Kennung und Auftrags-Marke) oder eine Arbeits-Session ist, und listet die Arbeits-Sessions dieses Masters.',
-    })
+    try {
+      await startVorbereiten($)
+    } catch {
+      // Ohne Werkzeuge bleibt die Session eine gewöhnliche Session.
+    }
 
     const sessionId = await $.session.id()
+    await wiedererkennen($, sessionId)
+    await wiederherstellen($, eigenes, sessionId)
     const master = await meinMaster($, sessionId)
     if (master) {
       $.ui.status('Dirigent · Master')
@@ -253,15 +754,18 @@ export const register: Register = on => {
 
   on('tool.call', { tool: 'mcp__dirigent__master_werden' }, async $ => {
     const sessionId = await $.session.id()
+    // Fortgesetzt unter neuer Id: derselbe Dirigent, keine neue Kennung.
+    await wiedererkennen($, sessionId)
     const bisher = await meinMaster($, sessionId)
     const kennung = bisher?.kennung ?? sessionId.slice(0, 8)
-    await $.store.set(`master:${kennung}`, { kennung, sessionId, seit: bisher?.seit ?? new Date().toISOString() } satisfies Master)
+    const hostId = await hostIdLesen($)
+    await $.store.set(`master:${kennung}`, { kennung, sessionId, seit: bisher?.seit ?? new Date().toISOString(), ...(bisher?.projekt ? { projekt: bisher.projekt } : {}), ...(hostId ? { hostId } : {}) } satisfies Master)
     await $.store.delete(`rolle:${sessionId}`)
     $.ui.status('Dirigent · Master')
     await bandStarten($, takt, kennung)
 
     return {
-      result: `Diese Session ist ${bisher ? 'weiterhin' : 'jetzt'} ein Dirigent-Master. Kennung: ${kennung}. Auftrags-Marke (genau so in jeden Auftrag und jede Folge-Nachricht): ${marke(kennung)}. Übergabe-Datei: ${uebergabe(kennung)}. Andere Dirigenten in anderen Sessions laufen unabhängig weiter.`,
+      result: `Diese Session ist ${bisher ? 'weiterhin' : 'jetzt'} ein Dirigent-Master. Kennung: ${kennung}. Auftrags-Marke (genau so in jeden Auftrag und jede Folge-Nachricht): ${marke(kennung)}. Übergabe-Datei: ${uebergabe(kennung)}. Offene Punkte: ${offenDatei(kennung)}. Andere Dirigenten in anderen Sessions laufen unabhängig weiter.`,
     }
   })
 
@@ -284,13 +788,16 @@ export const register: Register = on => {
     takt.uhr = undefined
     await update($, band, () => null)
 
-    return { result: `Dirigent ${master.kennung} beendet; ${frei} Arbeits-Session(s) freigegeben.` }
+    const offen = nochOffen(await offenLesen($, master.kennung).catch(() => ({ punkte: [], nachholen: [] }))).length
+    const rest = offen ? ` ${offen} offene Punkte bleiben in ${offenDatei(master.kennung)}.` : ''
+    return { result: `Dirigent ${master.kennung} beendet; ${frei} Arbeits-Session(s) freigegeben.${rest}` }
   })
 
   on('tool.call', { tool: 'mcp__dirigent__lage' }, async $ => {
     const sessionId = await $.session.id()
     const master = await meinMaster($, sessionId)
     const rolle = (await $.store.get(`rolle:${sessionId}`)) as Rolle | undefined
+    const offen = master ? nochOffen(await offenLesen($, master.kennung).catch(() => ({ punkte: [], nachholen: [] }))).length : 0
     const arbeitsSessions = []
     if (master) {
       for (const k of await $.store.keys()) {
@@ -307,73 +814,246 @@ export const register: Register = on => {
         marke: master ? marke(master.kennung) : null,
         arbeitsSessionVon: rolle ?? null,
         arbeitsSessions,
+        offenePunkte: offen,
       }),
     }
   })
 
+  on('tool.call', { tool: 'mcp__dirigent__master_benennen' }, async ($, e) => {
+    const projekt = projektName((e as unknown as { projekt?: unknown }).projekt)
+    const master = await meinMaster($, await $.session.id())
+    if (!master) return { result: 'Diese Session ist kein Dirigent-Master; nichts benannt.' }
+    if (!projekt) return { result: 'Kein Projektname angegeben; nichts benannt.' }
+    await $.store.set(`master:${master.kennung}`, { ...master, projekt } satisfies Master)
+    await bandAktualisieren($, takt, master.kennung)
+
+    const titel = `🎼 ${projekt}`
+    try {
+      const antwort = await $.mcp.call('ccd_session_mgmt', 'set_session_title', { session_id: 'self', title: titel })
+      if (!antwort.isError) return { result: `Titel gesetzt: ${titel}` }
+    } catch {
+      // Der Server ist für die Mod nicht erreichbar: der Master setzt den Titel selbst.
+    }
+
+    return { result: `Band benannt. Titel noch nicht gesetzt: set_session_title mit session_id "self" und title "${titel}" selbst aufrufen.` }
+  })
+
+  on('tool.call', { tool: 'mcp__dirigent__offen_merken' }, async ($, e) => {
+    const master = await meinMaster($, await $.session.id())
+    if (!master) return { result: 'Nur der Master führt offene Punkte; nichts gemerkt.' }
+    const datei = await offenLesen($, master.kennung)
+    const ergebnis = punktMerken(datei, e as unknown as Record<string, unknown>, await $.clock.now())
+    if ('fehler' in ergebnis) return { result: ergebnis.fehler }
+    if (!ergebnis.schonDa) await offenSchreiben($, master.kennung, datei)
+    eigenes.offenGemerkt = true
+    await bandAktualisieren($, takt, master.kennung)
+    const stand = `${ergebnis.punkt.id}; offen: ${nochOffen(datei).length}.`
+    const beiseite = datei.defekt === undefined ? '' : ' Die alte Datei war nicht lesbar und liegt daneben als .defekt-Datei.'
+    return { result: `${ergebnis.schonDa ? 'War schon gemerkt als' : 'Gemerkt als'} ${stand}${beiseite}` }
+  })
+
+  on('tool.call', { tool: 'mcp__dirigent__offen_erledigen' }, async ($, e) => {
+    const master = await meinMaster($, await $.session.id())
+    if (!master) return { result: 'Nur der Master führt offene Punkte; nichts geschlossen.' }
+    const datei = await offenLesen($, master.kennung)
+    const ergebnis = punktSchliessen(datei, e as unknown as Record<string, unknown>, await $.clock.now())
+    if ('fehler' in ergebnis) return { result: ergebnis.fehler }
+    await offenSchreiben($, master.kennung, datei)
+    await bandAktualisieren($, takt, master.kennung)
+    return { result: `${ergebnis.punkt.id} ist ${ergebnis.punkt.status}; offen: ${nochOffen(datei).length}.` }
+  })
+
+  on('tool.call', { tool: 'mcp__dirigent__offen_liste' }, async ($, e) => {
+    const master = await meinMaster($, await $.session.id())
+    if (!master) return { result: 'Nur der Master führt offene Punkte.' }
+    const datei = await offenLesen($, master.kennung)
+    const offen = nochOffen(datei)
+    const alle = (e as unknown as { alle?: unknown }).alle === true
+    return {
+      result: JSON.stringify({
+        datei: offenDatei(master.kennung),
+        anzahlOffen: offen.length,
+        punkte: alle ? datei.punkte : offen,
+        ...(datei.defekt === undefined ? {} : { warnung: 'Die Datei ist nicht lesbar; beim nächsten offen_merken wird sie zur Seite gelegt.' }),
+      }),
+    }
+  })
+
+  on('tool.call', { tool: 'mcp__dirigent__session_geprueft' }, async ($, e) => {
+    const master = await meinMaster($, await $.session.id())
+    if (!master) return { result: 'Nur der Master prüft Sessions; nichts geändert.' }
+    const name = String((e as unknown as { session?: unknown }).session ?? '').trim()
+    if (!name) return { result: 'Kein Name der Session angegeben; nichts geändert.' }
+    return { result: await geprueftSetzen($, takt, master.kennung, name) }
+  })
+
+  on('tool.call', { tool: 'mcp__dirigent__skill_aenderung' }, async ($, e) => {
+    const ein = e as unknown as { skill?: unknown; sicherung?: unknown; datum?: unknown }
+    const skill = String(ein.skill ?? '')
+    const sicherung = String(ein.sicherung ?? '').trim()
+    if (!/^[\w:.-]+$/.test(skill) || !sicherung) {
+      return { result: 'Nichts gemerkt: Skill-Name (nur Buchstaben, Ziffern, : . _ -) und Sicherungsordner sind nötig.' }
+    }
+    const heim = await $.env.get('HOME')
+    if (!(await $.fs.exists(sicherung.replace(/^~(?=\/)/, heim ?? '~')))) {
+      return { result: `Nichts gemerkt: Den Sicherungsordner ${sicherung} gibt es nicht. Ohne Sicherung lässt sich die Änderung nicht zurückspielen.` }
+    }
+    const datum = Date.parse(String(ein.datum ?? ''))
+    await aenderungSchreiben($, { skill, sicherung, zeit: Number.isNaN(datum) ? await $.clock.now() : datum })
+
+    return { result: `Änderung an ${skill} gemerkt; skills_lage vergleicht ab jetzt vorher und nachher.` }
+  })
+
+  on('tool.call', { tool: 'mcp__dirigent__skills_lage' }, async $ => ({ result: JSON.stringify(await skillsLage($)) }))
+
+  on('tool.call', { tool: 'mcp__dirigent__skill_hinweis' }, async ($, e) => {
+    const ein = e as unknown as { skill?: unknown; art?: unknown; text?: unknown }
+    if (!/^[\w:.-]+$/.test(String(ein.skill ?? '')) || !String(ein.text ?? '').trim()) {
+      return { result: 'Kein Hinweis gemerkt: Skill-Name (nur Buchstaben, Ziffern, : . _ -) und Text sind nötig.' }
+    }
+    await hinweisSchreiben($, {
+      skill: String(ein.skill ?? ''),
+      art: String(ein.art ?? 'fehler'),
+      text: String(ein.text ?? '').slice(0, 300),
+      zeit: await $.clock.now(),
+    })
+
+    return { result: 'Hinweis gemerkt; der Skill bleibt unverändert.' }
+  })
+
+  on('tool.call', { tool: 'mcp__dirigent__skills_ausblenden' }, async (_, e) => {
+    return { result: JSON.stringify(ausblendenBefehl((e as unknown as { skills?: unknown }).skills)) }
+  })
+
+  on('skill.prompt', async ($, e, next) => {
+    const antwort = await next(e)
+    if (!eigenes.geladen.some(g => g.skill === e.skill)) {
+      eigenes.geladen = [...eigenes.geladen, { skill: e.skill, zeit: await $.clock.now() }]
+      await melden($, eigenes)
+      await protokollieren($, eigenes)
+    }
+
+    return antwort
+  })
+
   on('session.end', async ($, e, next) => {
-    if (e.reason === 'clear' && (await meinMaster($, e.sessionId))) vorDemBereinigen = e.sessionId
     eigenes.zustand = 'beendet'
+    eigenes.wartetAufFreigabe = false
     await melden($, eigenes)
-    eigenes.schritte = []
-    eigenes.notiz = ''
+    await protokollieren($, eigenes)
+    try {
+      if (e.reason === 'clear') {
+        if (await meinMaster($, e.sessionId)) vorDemBereinigen = e.sessionId
+        // Eine bereinigte Arbeits-Session gehört erst mit dem nächsten Auftrag wieder dazu; die Host-Id darf ihr
+        // den alten Stand nicht zurückbringen. Erst nach dem Melden: ohne Rolle schriebe es nichts mehr.
+        else await $.store.delete(`rolle:${e.sessionId}`)
+      }
+    } catch {
+      // Dann erinnert nach dem Bereinigen niemand an die Übergabe; die Arbeit geht vor.
+    }
+    Object.assign(eigenes, neuesEigenes(), { hostId: eigenes.hostId, fuer: undefined, zusatzGeschrieben: undefined })
 
     return next(e)
   })
 
   on('prompt.submit', async ($, e, next) => {
-    const sessionId = await $.session.id()
+    // Eine Fehlfunktion der Mod darf die Nachricht nie aufhalten: alles hier, dann in jedem Fall `next`.
+    const kontext: string[] = []
+    try {
+      const sessionId = await $.session.id()
+      eigenes.wartetAufFreigabe = false
 
-    // Master nach /clear: neue Session-Id unter derselben Kennung eintragen und an die Übergabe erinnern.
-    if (vorDemBereinigen && vorDemBereinigen !== sessionId) {
-      const master = await meinMaster($, vorDemBereinigen)
-      vorDemBereinigen = undefined
-      if (master) {
-        await $.store.set(`master:${master.kennung}`, { ...master, sessionId } satisfies Master)
+      // Master nach /clear: neue Session-Id unter derselben Kennung eintragen und an die Übergabe erinnern.
+      let nachBereinigen: Master | undefined
+      if (vorDemBereinigen && vorDemBereinigen !== sessionId) {
+        nachBereinigen = await meinMaster($, vorDemBereinigen)
+        vorDemBereinigen = undefined
+      }
+      if (nachBereinigen) {
+        await $.store.set(`master:${nachBereinigen.kennung}`, { ...nachBereinigen, sessionId } satisfies Master)
         $.ui.status('Dirigent · Master')
+        eigenes.fuer = sessionId
         eigenes.zustand = 'arbeitet'
         await melden($, eigenes)
-        await bandStarten($, takt, master.kennung)
+        await bandStarten($, takt, nachBereinigen.kennung)
+        kontext.push(
+          `Du bist weiterhin die Dirigent-Master-Session mit der Kennung ${nachBereinigen.kennung} (Auftrags-Marke ${marke(nachBereinigen.kennung)}); der Chat wurde nach einer Übergabe bereinigt. Lade zuerst den Skill dirigent und lies ${uebergabe(nachBereinigen.kennung)}, dann bearbeite diese Nachricht.`,
+          ...(await offenFuerNachricht($, nachBereinigen.kennung)),
+        )
+      } else {
+        // Fortgesetzt ohne session.start: dieselbe Session nimmt ihren Stand wieder auf.
+        if (eigenes.fuer !== sessionId) {
+          const erkannt = await wiedererkennen($, sessionId)
+          await wiederherstellen($, eigenes, sessionId)
+          if (erkannt) {
+            $.ui.status('Dirigent · Master')
+            await bandStarten($, takt, erkannt.kennung)
+          }
+        }
 
-        return next({
-          ...e,
-          context: [
-            ...(e.context ?? []),
-            `Du bist weiterhin die Dirigent-Master-Session mit der Kennung ${master.kennung} (Auftrags-Marke ${marke(master.kennung)}); der Chat wurde nach einer Übergabe bereinigt. Lade zuerst den Skill dirigent und lies ${uebergabe(master.kennung)}, dann bearbeite diese Nachricht.`,
-          ],
-        })
+        // Ein Auftrag eines Masters macht diese Session zu dessen Arbeits-Session; ein Master wird nie eine.
+        // Was der Nutzer in einer Arbeits-Session tippt, bleibt immer in dieser Session.
+        eigenes.zustand = 'arbeitet'
+        eigenes.blockiert = false
+        eigenes.notiz = ''
+        const master = await meinMaster($, sessionId)
+        if (master) {
+          await melden($, eigenes)
+          if (!e.isMeta) kontext.push(...(await offenFuerNachricht($, master.kennung)))
+        } else if (!e.text.includes(MARKE)) {
+          await melden($, eigenes)
+        } else {
+          const treffer = NAME_IN_MARKE.exec(e.text)
+          const name = treffer?.[1]?.trim()
+          const alle = await alleMaster($)
+          // Ohne Kennung (ältere Aufträge) nur zuordnen, wenn es genau einen Dirigenten gibt.
+          const kennung = treffer?.[2] ?? (alle.length === 1 ? alle[0].kennung : undefined)
+          if (name && kennung && alle.some(m => m.kennung === kennung)) {
+            const hostId = await hostIdLesen($)
+            await $.store.set(`rolle:${sessionId}`, { name, kennung, ...(hostId ? { hostId } : {}) } satisfies Rolle)
+            $.ui.status('Dirigent · Arbeits-Session')
+            const gelesen = auftragLesen(e.text)
+            // Ein neuer Auftrag beginnt neu: alte Dateien sind kein Konflikt mit dem, was jetzt läuft.
+            if (gelesen.auftrag && gelesen.auftrag !== eigenes.auftrag) eigenes.pfade = []
+            eigenes.auftrag = gelesen.auftrag || eigenes.auftrag
+            if (gelesen.zugewiesen) eigenes.zugewiesen = [...new Set(gelesen.zugewiesen)]
+          }
+          await melden($, eigenes)
+          await protokollieren($, eigenes)
+        }
       }
+    } catch {
+      // Die Nachricht geht auch ohne Stand und Kontext durch.
     }
 
-    // Ein Auftrag eines Masters macht diese Session zu dessen Arbeits-Session; ein Master wird nie eine.
-    // Was der Nutzer in einer Arbeits-Session tippt, bleibt immer in dieser Session.
-    eigenes.zustand = 'arbeitet'
-    eigenes.blockiert = false
-    eigenes.notiz = ''
-    if (!e.text.includes(MARKE) || (await meinMaster($, sessionId))) {
+    return next(kontext.length ? { ...e, context: [...(e.context ?? []), ...kontext] } : e)
+  })
+
+  // Wartet die Session auf eine Freigabe-Karte? Die Karte selbst zeichnet die App erst nach dieser Kette.
+  // Ein Einstellungs-Hook kann die Frage schon beantwortet haben; dann wartet niemand.
+  on('classic.PermissionRequest', async ($, e, next) => {
+    const antwort = await next(e)
+    if (!e.agent_id && !antwort.decision) {
+      eigenes.wartetAufFreigabe = true
+      eigenes.zustand = 'wartet'
+      eigenes.blockiert = false
+      eigenes.notiz = 'wartet auf deine Freigabe'
       await melden($, eigenes)
-      return next(e)
     }
 
-    const treffer = NAME_IN_MARKE.exec(e.text)
-    const name = treffer?.[1]?.trim()
-    const alle = await alleMaster($)
-    // Ohne Kennung (ältere Aufträge) nur zuordnen, wenn es genau einen Dirigenten gibt.
-    const kennung = treffer?.[2] ?? (alle.length === 1 ? alle[0].kennung : undefined)
-    if (name && kennung && alle.some(m => m.kennung === kennung)) {
-      await $.store.set(`rolle:${sessionId}`, { name, kennung } satisfies Rolle)
-      $.ui.status('Dirigent · Arbeits-Session')
-    }
-    await melden($, eigenes)
-
-    return next(e)
+    return antwort
   })
 
   // Aufgabenliste, Fragen und Lebenszeichen dieser Session mitschreiben.
   on('tool.call', async ($, e, next) => {
-    if (e.agentId) return next(e)
     const werkzeug = String(e.tool)
     const ein = e as unknown as Record<string, unknown>
+    if (e.agentId) {
+      // Auch ein Unteragent ändert die Dateien dieser Session.
+      const vonAgent = await next(e)
+      await pfadMerken($, eigenes, werkzeug, ein, vonAgent)
+      return vonAgent
+    }
 
     if (werkzeug === 'AskUserQuestion') {
       eigenes.zustand = 'wartet'
@@ -387,12 +1067,22 @@ export const register: Register = on => {
     }
 
     const jetzt = await $.clock.now()
-    if (eigenes.zustand !== 'arbeitet' || jetzt - eigenes.gemeldet > HERZSCHLAG) {
+    // Ein paralleler Aufruf hebt das Warten auf eine Karte nicht auf.
+    if (!eigenes.wartetAufFreigabe && (eigenes.zustand !== 'arbeitet' || jetzt - eigenes.gemeldet > HERZSCHLAG)) {
       eigenes.zustand = 'arbeitet'
       await melden($, eigenes)
     }
 
     const antwort = await next(e)
+
+    // Der Aufruf kam zurück, also ist die Karte beantwortet.
+    if (eigenes.wartetAufFreigabe) {
+      eigenes.wartetAufFreigabe = false
+      eigenes.zustand = 'arbeitet'
+      eigenes.notiz = ''
+      await melden($, eigenes)
+    }
+    await pfadMerken($, eigenes, werkzeug, ein, antwort)
 
     if (werkzeug.endsWith('__update_plan')) {
       eigenes.schritte = planAnwenden(eigenes.schritte, ein)
@@ -411,8 +1101,17 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     if (!(e as { agentId?: string }).agentId) {
+      eigenes.wartetAufFreigabe = false
       eigenes.zustand = eigenes.blockiert ? 'wartet' : 'fertig'
       await melden($, eigenes)
+      await protokollieren($, eigenes)
+      try {
+        const master = await meinMaster($, await $.session.id())
+        if (master && e.reason === 'answer' && !eigenes.offenGemerkt) await netzPruefen($, master.kennung, e.answer)
+      } catch {
+        // Das Netz ist eine Hilfe, keine Bedingung.
+      }
+      eigenes.offenGemerkt = false
     }
 
     return next(e)
@@ -422,30 +1121,68 @@ export const register: Register = on => {
     const stand = await read($, band)
     if (stand === null || e.props.hasSurvey) return next(e)
 
-    const { Box, Text } = $.ui.resolve(e)
+    // Das Band gibt es nur im Terminal und auf dem Desktop; beide haben Eingabefeld und Auswahl.
+    const { Box, Button, Input, Select, Text } = $.ui.resolve(e) as unknown as ElementTable<'desktop'>
     const breite = e.props.bodyColumns
     const mitBalken = breite >= 56
     const anzeige = (prozent: number | null | undefined) =>
       typeof prozent === 'number' ? `${mitBalken ? `${balken(prozent)} ` : ''}${prozent} %` : ''
 
+    // Kopfzeile: Wichtiges zuerst, der Text zuletzt. So schneidet ein schmales Fenster zuerst den Text ab.
     const eigen = e.props.isWorking ? stand.eigenerSchritt || 'arbeitet' : 'bereit'
     const zahl = (z: BandZeile['zeichen']) => stand.zeilen.filter(s => s.zeichen === z).length
-    const zaehler = ['❓', '⚠️', '🔄', '⏸️', '✅'].filter(z => zahl(z) > 0).map(z => `${z}${zahl(z)}`).join(' ')
+    const zaehler = REIHENFOLGE.filter(z => zahl(z) > 0).map(z => `${z}${zahl(z)}`).join(' ')
     const mitListe = stand.zeilen.filter(z => typeof z.prozent === 'number')
     const gesamt = mitListe.length
       ? Math.round(mitListe.reduce((summe, z) => summe + (z.prozent ?? 0), 0) / mitListe.length)
       : null
-    const kopfRechts = [zaehler, anzeige(gesamt)].filter(Boolean).join('  ')
+    const offen = stand.offen ?? 0
+    const limit = stand.limit
+    const limitHoch = limit !== undefined && limit >= LIMIT_WARNUNG
+    const limitWarnung = limitHoch ? `⚠️ 5h ${limit} %` : ''
+    const links = [
+      `🎼 ${stand.projekt || 'Dirigent'}`,
+      offen > 0 ? `📌 ${offen}` : '',
+      limitWarnung,
+      zaehler,
+      anzeige(gesamt),
+      limit !== undefined && !limitHoch && breite >= 40 ? `5h ${limit} %` : '',
+    ].filter(Boolean)
+    const textPlatz = Math.max(breite - links.join('  ').length - 2, 8)
+
+    const konflikte = stand.konflikte ?? []
+    const konflikt = konflikte[0]
+    const konfliktText = konflikt
+      ? `${konflikt.datei}${konflikte.length > 1 ? ` und ${konflikte.length - 1} weitere` : ''}`
+      : ''
+
+    // Knöpfe stehen unter allen Stand-Zeilen und nur, wenn alle Stand-Zeilen trotzdem ganz sichtbar bleiben.
+    const ziele = stand.zeilen.filter(z => z.ziel)
+    const gewaehlt = await read($, auswahl)
+    const ziel = ziele.find(z => z.ziel === gewaehlt) ?? ziele.find(z => z.zeichen === '❓')
+    const standZeilen = 1 + (konflikt ? 1 : 0) + Math.max(stand.zeilen.length, 1)
+    const knoepfe = e.surface === 'desktop' && ziele.length > 0 && breite >= 36 && standZeilen < e.props.maxRows
+    const mitFeld = knoepfe && ziel?.zeichen === '❓' && ziel.antwortbar === true && standZeilen + 1 < e.props.maxRows
+    const zielId = ziel?.ziel ?? ''
+    const zielName = ziel?.name ?? ''
 
     return (
       <Box flexDirection="column">
         <Text wrap="truncate-end">
-          <Text bold>🎼 Dirigent</Text> {knapp(eigen, Math.max(breite - kopfRechts.length - 18, 8))}
-          {kopfRechts ? `  ${kopfRechts}` : ''}
+          <Text bold>{links[0]}</Text>
+          {links.slice(1).map(teil =>
+            teil === limitWarnung ? <Text bold color="warning">{`  ${teil}`}</Text> : `  ${teil}`,
+          )}
+          {`  ${knapp(eigen, textPlatz)}`}
         </Text>
+        {konflikt ? (
+          <Text wrap="truncate-end" bold color="warning">
+            ⚠️ Dateikonflikt {konflikt.sessions.join(' + ')}: {konfliktText}
+          </Text>
+        ) : null}
         {stand.zeilen.length === 0 ? <Text dimColor>Keine Arbeits-Session aktiv</Text> : null}
         {stand.zeilen.map(z => {
-          const vorn = [`${z.zeichen} ${z.name}${anzeige(z.prozent) ? ` ${anzeige(z.prozent)}` : ''}`, z.vorsatz].filter(Boolean).join(' · ')
+          const vorn = [`${z.zeichen} ${[z.name, z.skill, anzeige(z.prozent)].filter(Boolean).join(' ')}`, z.vorsatz].filter(Boolean).join(' · ')
 
           return (
             <Text wrap="truncate-end" dimColor={z.zeichen === '✅'} bold={z.zeichen === '❓' || z.zeichen === '⚠️'}>
@@ -453,6 +1190,53 @@ export const register: Register = on => {
             </Text>
           )
         })}
+        {knoepfe ? (
+          <Box flexDirection="row" columnGap={1}>
+            <Select
+              key="auswahl"
+              options={[
+                ...(ziel ? [] : [{ value: '', label: 'Session wählen' }]),
+                ...ziele.map(z => ({ value: z.ziel ?? '', label: z.name })),
+              ]}
+              value={zielId}
+              onSelect={wert => {
+                void update($, auswahl, () => wert || null)
+              }}
+            />
+            {ziel ? (
+              <Button
+                key="oeffnen"
+                label="Öffnen"
+                onPress={() => knopfAufruf($, 'ccd_window', 'open_session_in', { session_id: zielId, target: 'split' }, `${zielName} ist geöffnet`)}
+              />
+            ) : null}
+            {ziel && ziel.zustand !== 'fertig' ? (
+              <Button
+                key="stoppen"
+                label="Stoppen"
+                onPress={() => knopfAufruf($, 'ccd_session_mgmt', 'stop_session', { session_id: zielId }, `${zielName} ist gestoppt`)}
+              />
+            ) : null}
+          </Box>
+        ) : null}
+        {mitFeld ? (
+          <Input
+            key={`antwort-${zielId}`}
+            placeholder={`Antwort an ${zielName}`}
+            submitLabel="senden"
+            onSubmit={wert => {
+              const text = wert.trim()
+              if (!text) return
+              void knopfAufruf(
+                $,
+                'ccd_session_mgmt',
+                'send_message',
+                { session_id: zielId, message: `⟦dirigent:${zielName}@${stand.kennung ?? ''}⟧ Antwort des Nutzers aus dem Band: "${text}"` },
+                `Antwort an ${zielName} geschickt`,
+              )
+            }}
+          />
+        ) : null}
       </Box>
     )
   })
