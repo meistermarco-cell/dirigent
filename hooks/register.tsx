@@ -22,6 +22,46 @@ const MARKE = '⟦dirigent'
 const NAME_IN_MARKE = /⟦dirigent:([^⟧@＠]+)(?:[@＠]([0-9a-z]{8}))?⟧/
 const uebergabe = (kennung: string) => `~/.claude/dirigent/uebergabe-${kennung}.md`
 const marke = (kennung: string) => `⟦dirigent:<name>@${kennung}⟧`
+const markeFuer = (name: string, kennung: string) => `⟦dirigent:${name}@${kennung}⟧`
+const START_SESSION = 'mcp__ccd_session__start_session'
+
+// Name einer Arbeits-Session für die Marke: der `name` von start_session, sonst aus dem Titel gebildet.
+function sessionName(name: unknown, titel: unknown) {
+  const roh = typeof name === 'string' && name.trim() ? name : typeof titel === 'string' ? titel : ''
+  const sauber = roh
+    .toLowerCase()
+    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 30)
+    .replace(/-+$/, '')
+  return sauber || 'session'
+}
+
+// Merkt sich, welche Host-Id start_session für welchen Namen vergeben hat, damit Folge-Nachrichten die Marke
+// bekommen, auch bevor die neue Session ihren Auftrag gelesen hat.
+async function zielMerken($: EngineInterface, kennung: string, name: string, antwort: unknown) {
+  try {
+    const text = JSON.stringify(antwort ?? '')
+    const hostId = /local_[0-9a-f-]{36}/.exec(text)?.[0]
+    if (hostId) await $.store.set(`ziel:${hostId}`, { name, kennung })
+  } catch {
+    // Dann bekommt nur der erste Auftrag die Marke; die Session meldet sich trotzdem an.
+  }
+}
+
+// Name der Arbeits-Session hinter einer `local_…`-Id, wenn sie zu diesem Master gehört.
+async function zielName($: EngineInterface, kennung: string, an: unknown) {
+  if (typeof an !== 'string' || !an.startsWith('local_')) return undefined
+  const ziel = (await $.store.get(`ziel:${an}`)) as Rolle | undefined
+  if (ziel?.kennung === kennung) return ziel.name
+  for (const k of await $.store.keys()) {
+    if (!k.startsWith('rolle:')) continue
+    const rolle = (await $.store.get(k)) as Rolle | undefined
+    if (rolle?.hostId === an && rolle.kennung === kennung) return rolle.name
+  }
+  return undefined
+}
 
 // `$.store` ist eine Datei für alle Sessions. Darin pro Dirigent `master:<kennung>` und pro
 // Arbeits-Session `rolle:<sessionId>`. Die Kennung bleibt über ein Bereinigen (/clear) gleich,
@@ -726,6 +766,9 @@ async function startVorbereiten($: EngineInterface) {
 export const register: Register = on => {
   // Session-Id des Masters vor einem /clear. Danach läuft der Prozess unter einer neuen Id weiter.
   let vorDemBereinigen: string | undefined
+  // Hat der Master in diesem Prozess den Skill dirigent geladen oder schon einmal daran erinnert bekommen?
+  // `eigenes.geladen` taugt dafür nicht: Es kommt nach einem Neustart aus dem alten Stand zurück.
+  let skillErinnert = false
   const takt: Takt = {}
   const eigenes = neuesEigenes()
 
@@ -923,6 +966,7 @@ export const register: Register = on => {
 
   on('skill.prompt', async ($, e, next) => {
     const antwort = await next(e)
+    if (e.skill === 'dirigent' || e.skill.endsWith(':dirigent')) skillErinnert = true
     if (!eigenes.geladen.some(g => g.skill === e.skill)) {
       eigenes.geladen = [...eigenes.geladen, { skill: e.skill, zeit: await $.clock.now() }]
       await melden($, eigenes)
@@ -939,6 +983,7 @@ export const register: Register = on => {
     await protokollieren($, eigenes)
     try {
       if (e.reason === 'clear') {
+        skillErinnert = false
         if (await meinMaster($, e.sessionId)) vorDemBereinigen = e.sessionId
         // Eine bereinigte Arbeits-Session gehört erst mit dem nächsten Auftrag wieder dazu; die Host-Id darf ihr
         // den alten Stand nicht zurückbringen. Erst nach dem Melden: ohne Rolle schriebe es nichts mehr.
@@ -970,6 +1015,7 @@ export const register: Register = on => {
         $.ui.status('Dirigent · Master')
         eigenes.fuer = sessionId
         eigenes.zustand = 'arbeitet'
+        skillErinnert = true
         await melden($, eigenes)
         await bandStarten($, takt, nachBereinigen.kennung)
         kontext.push(
@@ -995,6 +1041,12 @@ export const register: Register = on => {
         const master = await meinMaster($, sessionId)
         if (master) {
           await melden($, eigenes)
+          if (!e.isMeta && !skillErinnert) {
+            skillErinnert = true
+            kontext.push(
+              `Du bist die Dirigent-Master-Session mit der Kennung ${master.kennung} (Auftrags-Marke ${marke(master.kennung)}). Ist der Skill dirigent in diesem Chat noch nicht geladen, lade ihn jetzt, bevor du diese Nachricht bearbeitest.`,
+            )
+          }
           if (!e.isMeta) kontext.push(...(await offenFuerNachricht($, master.kennung)))
         } else if (!e.text.includes(MARKE)) {
           await melden($, eigenes)
@@ -1038,6 +1090,29 @@ export const register: Register = on => {
     }
 
     return antwort
+  })
+
+  // Die Marke setzt die Mod selbst: Ein Master, der den Skill nach einem Neustart nicht geladen hat, vergisst sie
+  // sonst, und seine Arbeits-Sessions fehlen im Band.
+  on('tool.call', { tool: START_SESSION }, async ($, e, next) => {
+    const ein = e as unknown as Record<string, unknown>
+    const master = await meinMaster($, await $.session.id())
+    if (!master || typeof ein.prompt !== 'string') return next(e)
+    const name = sessionName(ein.name, ein.title)
+    const mitMarke = ein.prompt.includes(MARKE) ? ein.prompt : `${markeFuer(name, master.kennung)} ${ein.prompt}`
+    const antwort = await next({ ...e, prompt: mitMarke } as typeof e)
+    await zielMerken($, master.kennung, name, antwort)
+    return antwort
+  })
+
+  on('tool.call', { tool: 'SendMessage' }, async ($, e, next) => {
+    const ein = e as unknown as Record<string, unknown>
+    if (typeof ein.message !== 'string' || ein.message.includes(MARKE)) return next(e)
+    const master = await meinMaster($, await $.session.id())
+    if (!master) return next(e)
+    const name = await zielName($, master.kennung, ein.to)
+    if (!name) return next(e)
+    return next({ ...e, message: `${markeFuer(name, master.kennung)} ${ein.message}` } as typeof e)
   })
 
   // Aufgabenliste, Fragen und Lebenszeichen dieser Session mitschreiben.

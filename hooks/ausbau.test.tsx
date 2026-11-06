@@ -29,6 +29,8 @@ type Welt = {
   sessionId: string
   /** Steht unter jedem Werkzeug-Aufruf, wie die Engine. */
   werkzeugAntwort: () => unknown
+  /** Was bei der Engine als Werkzeug-Aufruf ankommt, nach allen Hooks der Mod. */
+  werkzeugEin: any[]
   freigabeAntwort: unknown
 }
 
@@ -43,6 +45,7 @@ function welt(
     kontexte: [],
     sessionId: ID,
     werkzeugAntwort: () => ({ result: {} }),
+    werkzeugEin: [],
     freigabeAntwort: {},
     store:
       rolle === 'master'
@@ -88,7 +91,10 @@ function welt(
     const antwort = mcp?.(e.tool, e.args)
     return { value: antwort ?? { content: [{ type: 'text', text: '{}' }], isError: false } }
   })
-  on('tool.call', () => w.werkzeugAntwort())
+  on('tool.call', (_: any, e: any) => {
+    w.werkzeugEin.push(e)
+    return w.werkzeugAntwort()
+  })
   on('classic.PermissionRequest', () => w.freigabeAntwort)
   on('prompt.submit', (_: any, e: any) => {
     w.kontexte.push(e.context)
@@ -203,6 +209,7 @@ test('jede Nachricht an den Master trägt die offene Liste', async ($, on) => {
 
 test('ohne offene Punkte hängt die Mod keinen Kontext an', async ($, on) => {
   const w = welt(on)
+  await $.skill.prompt({ skill: 'dirigent', text: '' })
   await nachricht($, 'hallo')
   expect(w.kontexte[0]).toBeUndefined()
 })
@@ -1048,4 +1055,65 @@ test('ohne jedes Dateisystem kommt eine Nachricht trotzdem durch', async ($, on)
   })
   await nachricht($, 'hallo')
   expect(seen).toEqual(['hallo'])
+})
+
+// --- Marke setzt die Mod selbst ---
+
+const ZIEL = 'local_11111111-2222-4333-8444-555555555555'
+
+test('ein Auftrag des Masters bekommt die Marke, auch wenn er sie vergisst', async ($, on) => {
+  const w = welt(on)
+  w.werkzeugAntwort = () => ({ result: { content: [{ type: 'text', text: `Started session "Lauf A" (session_id: ${ZIEL}, name: lauf2-a).` }] } })
+  await $.tool.call({ tool: 'mcp__ccd_session__start_session', name: 'lauf2-a', title: 'Lauf A', prompt: 'Baue Stück 1.' } as any)
+  expect(w.werkzeugEin.at(-1).prompt).toBe(`⟦dirigent:lauf2-a@${KENNUNG}⟧ Baue Stück 1.`)
+  expect(w.store[`ziel:${ZIEL}`]).toEqual({ name: 'lauf2-a', kennung: KENNUNG })
+
+  w.werkzeugAntwort = () => ({ result: {} })
+  await $.tool.call({ tool: 'SendMessage', to: ZIEL, message: 'Runde 2.' } as any)
+  expect(w.werkzeugEin.at(-1).message).toBe(`⟦dirigent:lauf2-a@${KENNUNG}⟧ Runde 2.`)
+})
+
+test('eine vorhandene Marke bleibt, ohne Namen hilft der Titel', async ($, on) => {
+  const w = welt(on)
+  const mitMarke = `⟦dirigent:eigen@${KENNUNG}⟧ Los.`
+  await $.tool.call({ tool: 'mcp__ccd_session__start_session', name: 'x', prompt: mitMarke } as any)
+  expect(w.werkzeugEin.at(-1).prompt).toBe(mitMarke)
+  await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'Größe prüfen: Runde 3', prompt: 'Los.' } as any)
+  expect(w.werkzeugEin.at(-1).prompt).toBe(`⟦dirigent:groesse-pruefen-runde-3@${KENNUNG}⟧ Los.`)
+})
+
+test('Nachrichten an fremde Sessions und Aufträge anderer Sessions bleiben unverändert', async ($, on) => {
+  const w = welt(on)
+  await $.tool.call({ tool: 'SendMessage', to: 'local_99999999-2222-4333-8444-555555555555', message: 'Hallo.' } as any)
+  expect(w.werkzeugEin.at(-1).message).toBe('Hallo.')
+  await $.tool.call({ tool: 'SendMessage', to: 'helfer', message: 'Hallo.' } as any)
+  expect(w.werkzeugEin.at(-1).message).toBe('Hallo.')
+})
+
+test('eine Arbeits-Session setzt keine Marke', async ($, on) => {
+  const w = welt(on, { rolle: 'arbeit' })
+  await $.tool.call({ tool: 'mcp__ccd_session__start_session', name: 'helfer', prompt: 'Los.' } as any)
+  expect(w.werkzeugEin.at(-1).prompt).toBe('Los.')
+})
+
+test('eine Folge-Nachricht an eine angemeldete Arbeits-Session bekommt deren Namen', async ($, on) => {
+  const w = welt(on)
+  w.store['rolle:bbbbbbbb-0000-4000-8000-000000000000'] = { name: 'handbuch', kennung: KENNUNG, hostId: ZIEL }
+  await $.tool.call({ tool: 'SendMessage', to: ZIEL, message: 'Weiter.' } as any)
+  expect(w.werkzeugEin.at(-1).message).toBe(`⟦dirigent:handbuch@${KENNUNG}⟧ Weiter.`)
+})
+
+test('der Master wird einmal an den Skill erinnert, nach dem Laden nicht mehr', async ($, on) => {
+  const w = welt(on)
+  await nachricht($, 'eins')
+  await nachricht($, 'zwei')
+  expect(w.kontexte[0]?.join('\n')).toContain('lade ihn jetzt')
+  expect(w.kontexte[1]?.join('\n') ?? '').not.toContain('lade ihn jetzt')
+})
+
+test('ist der Skill schon geladen, erinnert die Mod nicht', async ($, on) => {
+  const w = welt(on)
+  await $.skill.prompt({ skill: 'dirigent', text: '' })
+  await nachricht($, 'eins')
+  expect(w.kontexte[0]?.join('\n') ?? '').not.toContain('lade ihn jetzt')
 })
